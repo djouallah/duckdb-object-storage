@@ -132,8 +132,8 @@ LOAD ducklake;
 SET azure_transport_option_type = 'curl';
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
 SELECT CASE WHEN count(*) = 100100 THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END FROM lake.t;
-SELECT count(*) AS rows_at_first_data_snapshot
-FROM lake.t AT (VERSION => (SELECT min(snapshot_id) FROM ducklake_snapshots('lake') WHERE snapshot_id > 0));
+SELECT CASE WHEN count(*) = 100000 THEN 'time travel ok' ELSE error('rows at snapshot 1: ' || count(*)) END
+FROM lake.t AT (VERSION => 1);
 SELECT data_file FROM ducklake_list_files('lake', 't');
 DETACH lake;
 EOF
