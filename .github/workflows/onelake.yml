@@ -112,6 +112,25 @@ jobs:
             if [ $status -ne 0 ]; then echo '```'; grep -a -i error ducklake.log | tail -n 5; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
+      # TPC-H SF10 loaded into a duckdb_objfs database, 22 queries checked against the local parquet.
+      - name: Refresh OneLake token (TPC-H)
+        if: always() && env.ONELAKE_TOKEN != ''
+        run: |
+          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+          echo "::add-mask::${token}"
+          echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
+      - name: OneLake TPC-H SF10 (test/azure/tpch.sh)
+        if: always() && env.ONELAKE_TOKEN != ''
+        timeout-minutes: 45
+        env:
+          TPCH_SF: 10
+          TPCH_WORK_DIR: ${{ runner.temp }}/tpch
+        run: |
+          pipx install tpchgen-cli
+          bash test/azure/tpch.sh
+      - name: Free TPC-H scratch
+        if: always()
+        run: rm -rf "${{ runner.temp }}/tpch"
       # Racing writers, random kill -9, readers during writes, a >1 GiB sync: see the script header.
       # The token is minted again so it outlives the stress run.
       - name: Refresh OneLake token
