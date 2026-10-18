@@ -6,11 +6,6 @@ on:
   push:
     branches: [onelake-azblob]
   workflow_dispatch:
-    inputs:
-      cleanup:
-        description: Delete this run's OneLake data at the end
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -22,15 +17,15 @@ concurrency:
 
 env:
   ONELAKE_WORKSPACE: mimtest
-  # Schema-enabled lakehouse created for this POC.
+  # Schema-enabled lakehouse created for this POC. One database, reused by every run, never deleted.
   ONELAKE_LAKEHOUSE: duckdb_objfs.Lakehouse
+  ONELAKE_ROOT: duckdb_objfs.Lakehouse/Files/duckdb_objfs
+  DUCKLAKE_SCHEMA: ducklake_test
 
 jobs:
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      ONELAKE_ROOT: duckdb_objfs.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-rust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -50,33 +45,13 @@ jobs:
         run: cargo fmt --manifest-path rust/Cargo.toml --check
       - name: clippy
         run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - name: Mint OneLake token
-        run: |
-          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
-          echo "::add-mask::${token}"
-          echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
-      - name: cargo test (includes live OneLake round trip)
-        run: cargo test --manifest-path rust/Cargo.toml -- --nocapture
-      - name: Clean up OneLake
-        if: always() && env.ONELAKE_TOKEN != '' && inputs.cleanup != false
-        run: |
-          curl -s -o /dev/null -w "cleanup ${ONELAKE_ROOT}: %{http_code}\n" -X DELETE \
-            -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
-            "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${ONELAKE_ROOT}?recursive=true"
+      - name: cargo test
+        run: cargo test --manifest-path rust/Cargo.toml
 
   extension:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
-      ONELAKE_ROOT: duckdb_objfs.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-ext
-      # DuckLake tables land in Tables/<schema>/; one schema per run.
-      DUCKLAKE_SCHEMA: ci_${{ github.run_id }}_${{ github.run_attempt }}
       GEN: ninja
       # Shallow submodules carry no tags; pin the version so INSTALL azure resolves.
       OVERRIDE_GIT_DESCRIBE: v1.5.6
@@ -125,11 +100,3 @@ jobs:
           echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
       - name: OneLake e2e
         run: bash test/azure/run_e2e.sh
-      - name: Clean up OneLake
-        if: always() && env.ONELAKE_TOKEN != '' && inputs.cleanup != false
-        run: |
-          for path in "${ONELAKE_ROOT}" "${ONELAKE_LAKEHOUSE}/Tables/${DUCKLAKE_SCHEMA}"; do
-            curl -s -o /dev/null -w "cleanup ${path}: %{http_code}\n" -X DELETE \
-              -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
-              "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${path}?recursive=true"
-          done

@@ -94,7 +94,7 @@ run_phase() {
 
 run_phase write <<EOF
 ATTACH 'duckdb_objfs://e2e.db' AS obj;
-CREATE TABLE obj.items AS SELECT range AS i, md5(range::VARCHAR) AS payload FROM range(${ROWS});
+CREATE OR REPLACE TABLE obj.items AS SELECT range AS i, md5(range::VARCHAR) AS payload FROM range(${ROWS});
 CHECKPOINT obj;
 INSERT INTO checks SELECT 'rows written', '${ROWS}', count(*)::VARCHAR FROM obj.items;
 DETACH obj;
@@ -153,7 +153,7 @@ EOF
 # maps onto Tables/<schema>/<table>/). test_sales is the Delta-exported table; test_customers gets the DDL.
 
 LAKEHOUSE="${ONELAKE_LAKEHOUSE:?set ONELAKE_LAKEHOUSE, e.g. lh.Lakehouse}"
-S="${DUCKLAKE_SCHEMA:-e2e}"
+S="${DUCKLAKE_SCHEMA:-ducklake_test}"
 LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Tables/"
 SALES="lake.${S}.test_sales"
 ATTACH_RW="ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (DATA_PATH '${LAKE_DATA}', METADATA_CATALOG '__ducklake_metadata_lake', DATA_INLINING_ROW_LIMIT 0);"
@@ -169,6 +169,8 @@ run_phase ducklake_write <<EOF
 INSTALL ducklake;
 LOAD ducklake;
 ${ATTACH_RW}
+-- One catalog reused by every run: start the schema over.
+DROP SCHEMA IF EXISTS lake.${S} CASCADE;
 CREATE SCHEMA lake.${S};
 CREATE TABLE ${SALES} (
     sale_id BIGINT, sale_date DATE, sale_ts TIMESTAMP, region VARCHAR, product VARCHAR,
