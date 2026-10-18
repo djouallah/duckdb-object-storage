@@ -1,0 +1,107 @@
+name: onelake
+
+# POC: the azure (OneLake) backend, verified against live OneLake.
+# Auth is OIDC with the fabric-github-deploy app; it needs Contributor on the target workspace.
+on:
+  push:
+    branches: [onelake-azblob]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: onelake-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ONELAKE_WORKSPACE: mimtest
+  ONELAKE_LAKEHOUSE: temp.Lakehouse
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ONELAKE_ROOT: temp.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Resolve Cargo.lock
+        run: cargo metadata --format-version 1 --manifest-path rust/Cargo.toml > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cargo.lock
+          path: rust/Cargo.lock
+      - name: fmt (report only)
+        continue-on-error: true
+        run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - name: clippy
+        run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Mint OneLake token
+        run: |
+          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+          echo "::add-mask::${token}"
+          echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
+      - name: cargo test (includes live OneLake round trip)
+        run: cargo test --manifest-path rust/Cargo.toml -- --nocapture
+      - name: Clean up OneLake
+        if: always() && env.ONELAKE_TOKEN != ''
+        run: |
+          curl -s -o /dev/null -w "cleanup: %{http_code}\n" -X DELETE \
+            -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
+            "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${ONELAKE_ROOT}?recursive=true"
+
+  extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      ONELAKE_ROOT: temp.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-ext
+      GEN: ninja
+      # Shallow submodules carry no tags; pin the version so INSTALL azure resolves.
+      OVERRIDE_GIT_DESCRIBE: v1.5.6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.job }}
+      - name: Build (release)
+        run: make release
+      - name: Extension sqllogictests (local/memory backends)
+        run: make test_release
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Mint OneLake token
+        run: |
+          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+          echo "::add-mask::${token}"
+          echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
+      - name: OneLake e2e
+        run: bash test/azure/run_e2e.sh
+      - name: Clean up OneLake
+        if: always() && env.ONELAKE_TOKEN != ''
+        run: |
+          curl -s -o /dev/null -w "cleanup: %{http_code}\n" -X DELETE \
+            -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
+            "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${ONELAKE_ROOT}?recursive=true"
