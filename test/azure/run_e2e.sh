@@ -119,6 +119,9 @@ EOF
 LAKEHOUSE="${ONELAKE_LAKEHOUSE:?set ONELAKE_LAKEHOUSE, e.g. lh.Lakehouse}"
 LAKE_SCHEMA="${DUCKLAKE_SCHEMA:-e2e}"
 LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Tables/"
+TABLE="lake.${LAKE_SCHEMA}.test_sales"
+SNAPSHOT_FILE="${WORK_DIR}/snapshot_after_first_insert.csv"
+# A realistic table: mixed types, partitioned, three inserts, an update, a delete and an added column.
 run_phase ducklake_write <<EOF
 INSTALL ducklake;
 LOAD ducklake;
@@ -129,30 +132,68 @@ SET GLOBAL azure_transport_option_type = 'curl';
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake
     (DATA_PATH '${LAKE_DATA}', METADATA_CATALOG '__ducklake_metadata_lake', DATA_INLINING_ROW_LIMIT 0);
 CREATE SCHEMA lake.${LAKE_SCHEMA};
-CREATE TABLE lake.${LAKE_SCHEMA}.t AS SELECT range AS i FROM range(100000);
-INSERT INTO lake.${LAKE_SCHEMA}.t SELECT range AS i FROM range(100000, 100100);
-SELECT * FROM ducklake_snapshots('lake');
--- Writes each table's _delta_log next to its Parquet, so Fabric sees Tables/<schema>/t as a Delta table.
+CREATE TABLE ${TABLE} (
+    sale_id BIGINT,
+    sale_date DATE,
+    sale_ts TIMESTAMP,
+    region VARCHAR,
+    product VARCHAR,
+    quantity INTEGER,
+    unit_price DECIMAL(18, 4),
+    discount DOUBLE,
+    is_online BOOLEAN
+);
+ALTER TABLE ${TABLE} SET PARTITIONED BY (region);
+CREATE MACRO sales_batch(lo, hi) AS TABLE
+    SELECT range AS sale_id,
+           DATE '2024-01-01' + (range % 730)::INTEGER AS sale_date,
+           TIMESTAMP '2024-01-01' + to_seconds(range * 37) AS sale_ts,
+           ['north', 'south', 'east', 'west'][1 + range % 4] AS region,
+           'product_' || (range % 250) AS product,
+           (1 + range % 20)::INTEGER AS quantity,
+           (5 + (range % 1000) * 0.37)::DECIMAL(18, 4) AS unit_price,
+           (range % 15) / 100.0 AS discount,
+           range % 3 = 0 AS is_online
+    FROM range(lo, hi);
+INSERT INTO ${TABLE} SELECT * FROM sales_batch(0, 100000);
+COPY (SELECT max(snapshot_id) FROM ducklake_snapshots('lake')) TO '${SNAPSHOT_FILE}' (HEADER false);
+INSERT INTO ${TABLE} SELECT * FROM sales_batch(100000, 150000);
+UPDATE ${TABLE} SET discount = 0.5 WHERE region = 'north' AND quantity = 20;
+DELETE FROM ${TABLE} WHERE sale_id % 97 = 0;
+ALTER TABLE ${TABLE} ADD COLUMN channel VARCHAR;
+INSERT INTO ${TABLE}
+SELECT *, CASE WHEN is_online THEN 'web' ELSE 'store' END AS channel FROM sales_batch(150000, 160000);
+SELECT snapshot_id, changes FROM ducklake_snapshots('lake');
+-- Writes each table's _delta_log next to its Parquet, so Fabric sees Tables/<schema>/test_sales as Delta.
 CALL delta_export();
 DETACH lake;
 EOF
 
+# 150000 rows, minus the 1547 ids divisible by 97 below 150000, plus 10000.
+EXPECTED_ROWS=158453
+DELTA_TABLE="delta_scan('${LAKE_DATA}${LAKE_SCHEMA}/test_sales')"
 run_phase ducklake_read <<EOF
 LOAD ducklake;
-SET GLOBAL azure_transport_option_type = 'curl';
-ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
-SELECT CASE WHEN count(*) = 100100 THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END
-FROM lake.${LAKE_SCHEMA}.t;
--- Snapshots: 0 = catalog created, 1 = schema, 2 = CTAS, 3 = insert.
-SELECT CASE WHEN count(*) = 100000 THEN 'time travel ok' ELSE error('rows at snapshot 2: ' || count(*)) END
-FROM lake.${LAKE_SCHEMA}.t AT (VERSION => 2);
-SELECT data_file FROM ducklake_list_files('lake', 't', schema => '${LAKE_SCHEMA}');
-DETACH lake;
--- Read it back as plain Delta, the way Fabric / any Delta reader will.
 INSTALL delta;
 LOAD delta;
-SELECT CASE WHEN count(*) = 100100 THEN 'delta export ok' ELSE error('delta rows: ' || count(*)) END
-FROM delta_scan('${LAKE_DATA}${LAKE_SCHEMA}/t');
+SET GLOBAL azure_transport_option_type = 'curl';
+ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
+SELECT CASE WHEN count(*) = ${EXPECTED_ROWS} THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END
+FROM ${TABLE};
+SELECT CASE WHEN count(*) = 100000 THEN 'time travel ok' ELSE error('rows after first insert: ' || count(*)) END
+FROM ${TABLE} AT (VERSION => $(cat "${SNAPSHOT_FILE}"));
+SELECT regexp_extract(data_file, 'region=([^/]+)', 1) AS region_partition, count(*) AS data_files
+FROM ducklake_list_files('lake', 'test_sales', schema => '${LAKE_SCHEMA}') GROUP BY ALL ORDER BY ALL;
+-- Read it back as plain Delta, the way Fabric / any Delta reader will, and compare row for row.
+DESCRIBE SELECT * FROM ${DELTA_TABLE};
+SELECT CASE
+    WHEN (SELECT count(*) FROM ${DELTA_TABLE}) <> ${EXPECTED_ROWS}
+        THEN error('delta rows: ' || (SELECT count(*) FROM ${DELTA_TABLE}))
+    WHEN (SELECT count(*) FROM (SELECT sale_id, sale_date, sale_ts::TIMESTAMP AS sale_ts, region, product, quantity, unit_price, discount, is_online, channel FROM ${TABLE} EXCEPT ALL SELECT sale_id, sale_date, sale_ts::TIMESTAMP AS sale_ts, region, product, quantity, unit_price, discount, is_online, channel FROM ${DELTA_TABLE})) > 0
+        OR (SELECT count(*) FROM (SELECT sale_id, sale_date, sale_ts::TIMESTAMP AS sale_ts, region, product, quantity, unit_price, discount, is_online, channel FROM ${DELTA_TABLE} EXCEPT ALL SELECT sale_id, sale_date, sale_ts::TIMESTAMP AS sale_ts, region, product, quantity, unit_price, discount, is_online, channel FROM ${TABLE})) > 0
+        THEN error('delta export differs from ducklake')
+    ELSE 'delta matches ducklake row for row' END;
+DETACH lake;
 EOF
 
 echo "=== OneLake objects under ${WORKSPACE}/${ROOT}"

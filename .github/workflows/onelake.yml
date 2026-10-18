@@ -82,17 +82,35 @@ jobs:
       OVERRIDE_GIT_DESCRIBE: v1.5.6
     steps:
       - uses: actions/checkout@v4
+      # The build only depends on the extension sources and the submodule commits, so a change to
+      # the e2e script reuses the previous duckdb binary instead of recompiling DuckDB.
+      - name: Build cache key
+        id: key
+        run: |
+          echo "submodules=$(git ls-tree HEAD duckdb extension-ci-tools | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore duckdb binary
+        id: build-cache
+        uses: actions/cache@v4
         with:
-          submodules: recursive
+          path: build/release/duckdb
+          key: duckdb-release-${{ steps.key.outputs.submodules }}-${{ hashFiles('src/**', 'rust/src/**', 'rust/include/**', 'rust/Cargo.toml', 'rust/build.rs', 'rust/proto/**', 'CMakeLists.txt', 'extension_config.cmake', 'Makefile', 'test/sql/**') }}
+      - name: Checkout submodules
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --recursive --depth 1
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.build-cache.outputs.cache-hit != 'true'
       - name: Install build tools
+        if: steps.build-cache.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y ninja-build
       - uses: hendrikmuhs/ccache-action@v1.2
+        if: steps.build-cache.outputs.cache-hit != 'true'
         with:
           key: ${{ github.job }}
       - name: Build (release)
+        if: steps.build-cache.outputs.cache-hit != 'true'
         run: make release
       - name: Extension sqllogictests (local/memory backends)
+        if: steps.build-cache.outputs.cache-hit != 'true'
         run: make test_release
       - name: Azure login (OIDC)
         uses: azure/login@v2
