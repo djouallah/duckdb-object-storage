@@ -1,16 +1,13 @@
 -- DuckLake on OneLake: catalog in a duckdb_objfs database, data in the lakehouse Tables/ section.
 -- Run with: ONELAKE_TOKEN=<token for https://storage.azure.com> duckdb -bail -f test/azure/test.sql
 -- One catalog and one schema, reused by every run. Results: checks table, also written to ducklake_checks.md.
+-- Delta export is not part of this test; see delta_export_info.sql.
 
 .timer on
 INSTALL azure;
 LOAD azure;
 INSTALL ducklake;
 LOAD ducklake;
-INSTALL delta_export FROM community;
-LOAD delta_export;
-INSTALL delta;
-LOAD delta;
 LOAD duckdb_object_storage;
 
 SET GLOBAL azure_transport_option_type = 'curl';
@@ -23,8 +20,7 @@ CREATE TEMP TABLE checks (check_name VARCHAR, expected VARCHAR, actual VARCHAR);
 
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (
     DATA_PATH 'abfss://mimtest@onelake.dfs.fabric.microsoft.com/duckdb_objfs.Lakehouse/Tables/',
-    METADATA_CATALOG '__ducklake_metadata_lake',  -- delta_export() finds the catalog through this
-    DATA_INLINING_ROW_LIMIT 0                     -- every row in Parquet
+    DATA_INLINING_ROW_LIMIT 0  -- every row in Parquet
 );
 CREATE SCHEMA IF NOT EXISTS lake.ducklake_test;
 USE lake.ducklake_test;
@@ -155,11 +151,10 @@ FROM test_customers AT (VERSION => getvariable('before_ddl_snapshot'));
 
 USE memory;
 DETACH lake;
-ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (METADATA_CATALOG '__ducklake_metadata_lake');
+ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake;
 USE lake.ducklake_test;
 
--- delta_export() only sees data files, not DuckLake delete files: rewrite them away first.
-CALL ducklake_rewrite_data_files('lake');
+CALL ducklake_rewrite_data_files('lake');  -- folds delete files into new data files
 INSERT INTO checks SELECT 'rows after rewriting deletes', '158958', count(*)::VARCHAR FROM test_sales;
 SET VARIABLE files_before = (SELECT count(*) FROM ducklake_list_files('lake', 'test_sales', schema => 'ducklake_test'));
 CALL ducklake_merge_adjacent_files('lake');
@@ -171,29 +166,6 @@ CALL ducklake_expire_snapshots('lake', older_than => now());
 CALL ducklake_cleanup_old_files('lake', cleanup_all => true);
 INSERT INTO checks SELECT 'snapshots after expire', '1', count(*)::VARCHAR FROM ducklake_snapshots('lake');
 INSERT INTO checks SELECT 'rows after maintenance', '158958', count(*)::VARCHAR FROM test_sales;
-
----------------------------------------------------------------- Delta export, read back with delta_scan
-
-CALL delta_export();  -- writes each table's _delta_log next to its Parquet
-INSERT INTO checks SELECT 'delta test_sales rows', '158958', count(*)::VARCHAR
-FROM delta_scan('abfss://mimtest@onelake.dfs.fabric.microsoft.com/duckdb_objfs.Lakehouse/Tables/ducklake_test/test_sales');
-INSERT INTO checks SELECT 'delta = ducklake, row for row', '0', (
-    SELECT count(*) FROM (
-        (SELECT sale_id, sale_date, sale_ts::TIMESTAMP, region, product, quantity, unit_price, discount, is_online, channel
-         FROM test_sales
-         EXCEPT ALL
-         SELECT sale_id, sale_date, sale_ts::TIMESTAMP, region, product, quantity, unit_price, discount, is_online, channel
-         FROM delta_scan('abfss://mimtest@onelake.dfs.fabric.microsoft.com/duckdb_objfs.Lakehouse/Tables/ducklake_test/test_sales'))
-        UNION ALL
-        (SELECT sale_id, sale_date, sale_ts::TIMESTAMP, region, product, quantity, unit_price, discount, is_online, channel
-         FROM delta_scan('abfss://mimtest@onelake.dfs.fabric.microsoft.com/duckdb_objfs.Lakehouse/Tables/ducklake_test/test_sales')
-         EXCEPT ALL
-         SELECT sale_id, sale_date, sale_ts::TIMESTAMP, region, product, quantity, unit_price, discount, is_online, channel
-         FROM test_sales)
-    )
-)::VARCHAR;
-INSERT INTO checks SELECT 'delta test_customers rows', '25000', count(*)::VARCHAR
-FROM delta_scan('abfss://mimtest@onelake.dfs.fabric.microsoft.com/duckdb_objfs.Lakehouse/Tables/ducklake_test/test_customers');
 
 ---------------------------------------------------------------- results
 

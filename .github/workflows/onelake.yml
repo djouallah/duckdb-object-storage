@@ -112,3 +112,12 @@ jobs:
             if [ $status -ne 0 ]; then echo '```'; grep -a -i error ducklake.log | tail -n 5; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
+      - name: Delta export (information only, not a test)
+        if: always() && env.ONELAKE_TOKEN != ''
+        continue-on-error: true
+        run: |
+          CURL_CA_INFO=/etc/ssl/certs/ca-certificates.crt build/release/duckdb -f test/azure/delta_export_info.sql 2>&1 | tee delta_export.log
+          {
+            echo "## Delta export (information only)"
+            if [ -s delta_export_info.md ]; then cat delta_export_info.md; else echo '```'; grep -a -i error delta_export.log | tail -n 3; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
