@@ -50,6 +50,9 @@ for n in $(seq 1 22); do
 		SELECT regexp_replace(query, ';\s*$', '') FROM tpch_queries() WHERE query_nr = ${n};" >"${file}"
 	grep -qi select "${file}" || { echo "could not extract TPC-H query ${n}" >&2; exit 1; }
 done
+# Q11's FRACTION is 0.0001 / SF in the spec; DuckDB ships the SF1 value, which returns 0 rows at SF10.
+sed -i "s|\* 0\.0001000000|* (0.0001000000 / ${SF})|" "${QUERY_DIR}/q11.sql"
+grep -q "/ ${SF})" "${QUERY_DIR}/q11.sql" || { echo "could not scale Q11's fraction" >&2; exit 1; }
 
 # ---------------------------------------------------------------- load into OneLake
 
