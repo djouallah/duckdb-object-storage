@@ -29,6 +29,8 @@ jobs:
           path: build/release/duckdb
           key: duckdb-release-${{ steps.key.outputs.submodules }}-${{ hashFiles('src/**', 'rust/src/**', 'rust/include/**', 'rust/Cargo.toml', 'rust/build.rs', 'rust/proto/**', 'CMakeLists.txt', 'extension_config.cmake', 'Makefile', 'test/sql/**') }}
           fail-on-cache-miss: true
+      - name: Install gdb (backtrace of the abort)
+        run: command -v gdb || (sudo apt-get update && sudo apt-get install -y gdb)
       - name: Repros (test/local/repro.sh)
         env:
           REPRO_WORK_DIR: ${{ runner.temp }}/repro

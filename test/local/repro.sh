@@ -156,7 +156,8 @@ abort_trial() { # abort_trial <kind> <n>: prints A's exit status and how it ende
 		echo "INSERT INTO ${table} VALUES (-1);"
 		echo "DETACH obj;"
 	} >"${b}.sql"
-	"${DUCKDB_BIN}" -bail -f "${a}.sql" >"${a}.log" 2>&1 &
+	# shellcheck disable=SC2086
+	${A_WRAP:-} "${DUCKDB_BIN}" -bail -f "${a}.sql" >"${a}.log" 2>&1 &
 	local pid=$!
 	PIDS+=("${pid}")
 	wait_for "${a}.ready" 60 || true
@@ -191,6 +192,20 @@ for kind in plain ducklake; do
 done
 if [[ ${ABORTS} -gt 0 ]]; then say "**2. abort: REPRODUCED (${ABORTS} of $((2 * TRIALS)) trials)**"; else say "2. abort: NOT REPRODUCED"; fi
 say ""
+
+# Where the abort comes from: rerun DuckLake trials with A under gdb until one aborts.
+if command -v gdb >/dev/null; then
+	for ((n = 1; n <= TRIALS; n++)); do
+		line=$(A_WRAP="gdb -q -batch -ex run -ex bt --args" abort_trial ducklake "gdb${n}")
+		if [[ ${line} == *"std::terminate"* ]]; then
+			say "backtrace of the aborting writer (gdb trial ${n}):"
+			say '```'
+			grep -a -E '^#[0-9]+ ' "${A_DIR}/ducklake_gdb${n}_a.log" | sed -E 's/ \(.*\) at / at /' | cut -c1-220 | head -n 40 | tee -a "${SUMMARY}"
+			say '```'
+			break
+		fi
+	done
+fi
 
 # ---------------------------------------------------------------- 3. reattach
 # A attaches read-write and commits, then idles. B attaches read-write and commits (fencing A). A
