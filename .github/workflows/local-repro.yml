@@ -35,6 +35,18 @@ jobs:
         env:
           REPRO_WORK_DIR: ${{ runner.temp }}/repro
         run: bash test/local/repro.sh
+      - name: Issue snippet - readers
+        if: always()
+        run: bash test/local/issues/readers.sh
+      - name: Issue snippet - reattach
+        if: always()
+        run: bash test/local/issues/reattach.sh
+      - name: Issue snippet - fenced writer (plain)
+        if: always()
+        run: KIND=plain bash test/local/issues/fenced_writer.sh
+      - name: Issue snippet - fenced writer (ducklake)
+        if: always()
+        run: KIND=ducklake bash test/local/issues/fenced_writer.sh
       - name: Upload repro logs
         if: always()
         uses: actions/upload-artifact@v4
