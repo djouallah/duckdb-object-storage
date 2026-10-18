@@ -147,6 +147,58 @@ INSERT INTO checks SELECT 'rows after checkpoint + reopen', '$((ROWS + 1000))', 
 DETACH obj;
 EOF
 
+# Multi-table transaction: one committed across orders + order_lines, then one left open across both
+# tables when duckdb is killed. After recovery: committed rows in both tables, uncommitted in neither.
+run_phase multi_table_commit <<EOF
+ATTACH 'duckdb_objfs://e2e.db' AS obj;
+CREATE OR REPLACE TABLE obj.orders (order_id BIGINT, status VARCHAR);
+CREATE OR REPLACE TABLE obj.order_lines (order_id BIGINT, line_no INTEGER, status VARCHAR);
+BEGIN;
+INSERT INTO obj.orders SELECT range, 'committed' FROM range(100);
+INSERT INTO obj.order_lines SELECT o.range, l.range, 'committed' FROM range(100) o, range(3) l;
+COMMIT;
+INSERT INTO checks SELECT 'orders committed', '100', count(*)::VARCHAR FROM obj.orders;
+DETACH obj;
+EOF
+
+TXN_SQL="${WORK_DIR}/open_txn.sql"
+TXN_MARKER="${WORK_DIR}/txn_open.csv"
+{
+	preamble
+	cat <<EOF
+ATTACH 'duckdb_objfs://e2e.db' AS obj;
+BEGIN;
+INSERT INTO obj.orders SELECT range, 'uncommitted' FROM range(100, 200);
+INSERT INTO obj.order_lines SELECT o.range, l.range, 'uncommitted' FROM range(100, 200) o, range(3) l;
+COPY (SELECT 1) TO '${TXN_MARKER}';
+SELECT count(*) FROM range(1000000000000);
+EOF
+} >"${TXN_SQL}"
+"${DUCKDB_BIN}" -f "${TXN_SQL}" &
+TXN_PID=$!
+for _ in $(seq 1 600); do
+	[[ -f "${TXN_MARKER}" ]] && break
+	kill -0 "${TXN_PID}" 2>/dev/null || break
+	sleep 0.5
+done
+if [[ -f "${TXN_MARKER}" ]]; then
+	kill -9 "${TXN_PID}"
+	wait "${TXN_PID}" 2>/dev/null || true
+	echo "### ✅ open transaction across orders + order_lines, then kill -9 before COMMIT" >>"${SUMMARY}"
+else
+	echo "### ❌ open-transaction writer exited early" >>"${SUMMARY}"
+	FAILED+=("open_txn")
+fi
+
+run_phase multi_table_recover <<EOF
+ATTACH 'duckdb_objfs://e2e.db' AS obj;
+INSERT INTO checks SELECT 'committed orders kept', '100', count(*)::VARCHAR FROM obj.orders WHERE status = 'committed';
+INSERT INTO checks SELECT 'committed order_lines kept', '300', count(*)::VARCHAR FROM obj.order_lines WHERE status = 'committed';
+INSERT INTO checks SELECT 'uncommitted orders absent', '0', count(*)::VARCHAR FROM obj.orders WHERE status = 'uncommitted';
+INSERT INTO checks SELECT 'uncommitted order_lines absent', '0', count(*)::VARCHAR FROM obj.order_lines WHERE status = 'uncommitted';
+DETACH obj;
+EOF
+
 # Accidental second writer: A attaches and commits; B attaches read-write while A is still open and
 # commits (fencing A); A then tries to commit again. The database must stay consistent: A's first
 # commit and B's rows survive, A's late write does not, and the database still opens.

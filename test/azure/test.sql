@@ -98,6 +98,25 @@ SELECT range, 'customer_' || range, ['AU', 'NZ', 'FR', 'DZ', 'US'][1 + range % 5
 FROM range(20000, 25000);
 ALTER TABLE test_customers RENAME TO test_customers_v2;
 
+---------------------------------------------------------------- multi-table transactions
+
+SET VARIABLE before_multi_snapshot = (SELECT max(snapshot_id) FROM ducklake_snapshots('lake'));
+BEGIN;
+INSERT INTO test_sales SELECT *, 'multi' FROM sales_batch(170000, 170100);
+INSERT INTO test_customers_v2 (customer_id, full_name, country, signup_date, lifetime_value)
+SELECT range, 'multi_' || range, 'AU', DATE '2024-01-01', 1.0 FROM range(30000, 30050);
+COMMIT;
+SET VARIABLE multi_snapshot = (SELECT max(snapshot_id) FROM ducklake_snapshots('lake'));
+INSERT INTO checks SELECT 'multi-table commit = one snapshot', '1', count(*)::VARCHAR
+FROM ducklake_snapshots('lake') WHERE snapshot_id > getvariable('before_multi_snapshot');
+
+BEGIN;
+DELETE FROM test_sales;
+DELETE FROM test_customers_v2;
+ROLLBACK;
+INSERT INTO checks SELECT 'multi-table rollback', '159058 | 25050',
+    (SELECT count(*) FROM test_sales)::VARCHAR || ' | ' || (SELECT count(*) FROM test_customers_v2)::VARCHAR;
+
 ---------------------------------------------------------------- reopen read-only and check
 
 USE memory;
@@ -105,7 +124,7 @@ DETACH lake;
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
 USE lake.ducklake_test;
 
-INSERT INTO checks SELECT 'test_sales rows', '158958', count(*)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'test_sales rows', '159058', count(*)::VARCHAR FROM test_sales;
 INSERT INTO checks SELECT 'time travel by version', '100000', count(*)::VARCHAR
 FROM test_sales AT (VERSION => getvariable('first_insert_snapshot'));
 INSERT INTO checks SELECT 'time travel by timestamp', '100000', count(*)::VARCHAR
@@ -122,14 +141,25 @@ INSERT INTO checks SELECT 'update applied', 'true', (count(*) > 0)::VARCHAR FROM
 INSERT INTO checks SELECT 'merge inserted', '505', count(*)::VARCHAR FROM test_sales WHERE channel = 'merge';
 INSERT INTO checks SELECT 'merge updated', '495', count(*)::VARCHAR
 FROM test_sales WHERE sale_id BETWEEN 1000 AND 1499 AND quantity = 999;
-INSERT INTO checks SELECT 'added column filled', '10505', count(channel)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'added column filled', '10605', count(channel)::VARCHAR FROM test_sales;
 INSERT INTO checks SELECT 'partitions (region)', 'east,north,south,west',
     string_agg(DISTINCT regexp_extract(data_file, 'region=([^/]+)', 1), ','
                ORDER BY regexp_extract(data_file, 'region=([^/]+)', 1))
 FROM ducklake_list_files('lake', 'test_sales', schema => 'ducklake_test');
 INSERT INTO checks SELECT 'view', '4', count(*)::VARCHAR FROM test_sales_by_region;
 
-INSERT INTO checks SELECT 'renamed table rows', '25000', count(*)::VARCHAR FROM test_customers_v2;
+INSERT INTO checks SELECT 'multi-table commit visible in both', '100 | 50',
+    (SELECT count(*) FROM test_sales WHERE channel = 'multi')::VARCHAR || ' | ' ||
+    (SELECT count(*) FROM test_customers_v2 WHERE full_name LIKE 'multi_%')::VARCHAR;
+INSERT INTO checks SELECT 'time travel: neither before the commit', '0 | 0',
+    (SELECT count(*) FROM test_sales AT (VERSION => getvariable('before_multi_snapshot')) WHERE channel = 'multi')::VARCHAR
+    || ' | ' ||
+    (SELECT count(*) FROM test_customers_v2 AT (VERSION => getvariable('before_multi_snapshot')) WHERE full_name LIKE 'multi_%')::VARCHAR;
+INSERT INTO checks SELECT 'time travel: both at the commit', '100 | 50',
+    (SELECT count(*) FROM test_sales AT (VERSION => getvariable('multi_snapshot')) WHERE channel = 'multi')::VARCHAR
+    || ' | ' ||
+    (SELECT count(*) FROM test_customers_v2 AT (VERSION => getvariable('multi_snapshot')) WHERE full_name LIKE 'multi_%')::VARCHAR;
+INSERT INTO checks SELECT 'renamed table rows', '25050', count(*)::VARCHAR FROM test_customers_v2;
 INSERT INTO checks SELECT 'old table name gone', '0', count(*)::VARCHAR
 FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'ducklake_test' AND table_name = 'test_customers';
 INSERT INTO checks SELECT 'renamed column', 'full_name', string_agg(column_name, ',')
@@ -155,7 +185,7 @@ ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake;
 USE lake.ducklake_test;
 
 CALL ducklake_rewrite_data_files('lake');  -- folds delete files into new data files
-INSERT INTO checks SELECT 'rows after rewriting deletes', '158958', count(*)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'rows after rewriting deletes', '159058', count(*)::VARCHAR FROM test_sales;
 SET VARIABLE files_before = (SELECT count(*) FROM ducklake_list_files('lake', 'test_sales', schema => 'ducklake_test'));
 CALL ducklake_merge_adjacent_files('lake');
 INSERT INTO checks SELECT 'compaction (data files)', 'fewer',
@@ -165,7 +195,7 @@ FROM ducklake_list_files('lake', 'test_sales', schema => 'ducklake_test');
 CALL ducklake_expire_snapshots('lake', older_than => now());
 CALL ducklake_cleanup_old_files('lake', cleanup_all => true);
 INSERT INTO checks SELECT 'snapshots after expire', '1', count(*)::VARCHAR FROM ducklake_snapshots('lake');
-INSERT INTO checks SELECT 'rows after maintenance', '158958', count(*)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'rows after maintenance', '159058', count(*)::VARCHAR FROM test_sales;
 
 ---------------------------------------------------------------- results
 
