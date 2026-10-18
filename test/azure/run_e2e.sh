@@ -122,12 +122,18 @@ LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Ta
 run_phase ducklake_write <<EOF
 INSTALL ducklake;
 LOAD ducklake;
+INSTALL delta_export FROM community;
+LOAD delta_export;
 SET azure_transport_option_type = 'curl';
-ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (DATA_PATH '${LAKE_DATA}');
+-- delta_export() finds the catalog through METADATA_CATALOG; inlining off so every row is in Parquet.
+ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake
+    (DATA_PATH '${LAKE_DATA}', METADATA_CATALOG '__ducklake_metadata_lake', DATA_INLINING_ROW_LIMIT 0);
 CREATE SCHEMA lake.${LAKE_SCHEMA};
 CREATE TABLE lake.${LAKE_SCHEMA}.t AS SELECT range AS i FROM range(100000);
 INSERT INTO lake.${LAKE_SCHEMA}.t SELECT range AS i FROM range(100000, 100100);
 SELECT * FROM ducklake_snapshots('lake');
+-- Writes each table's _delta_log next to its Parquet, so Fabric sees Tables/<schema>/t as a Delta table.
+CALL delta_export();
 DETACH lake;
 EOF
 
@@ -142,6 +148,11 @@ SELECT CASE WHEN count(*) = 100000 THEN 'time travel ok' ELSE error('rows at sna
 FROM lake.${LAKE_SCHEMA}.t AT (VERSION => 2);
 SELECT data_file FROM ducklake_list_files('lake', 't', schema => '${LAKE_SCHEMA}');
 DETACH lake;
+-- Read it back as plain Delta, the way Fabric / any Delta reader will.
+INSTALL delta;
+LOAD delta;
+SELECT CASE WHEN count(*) = 100100 THEN 'delta export ok' ELSE error('delta rows: ' || count(*)) END
+FROM delta_scan('${LAKE_DATA}${LAKE_SCHEMA}/t');
 EOF
 
 echo "=== OneLake objects under ${WORKSPACE}/${ROOT}"
