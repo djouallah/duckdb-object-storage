@@ -11,6 +11,8 @@ WORKSPACE="${ONELAKE_WORKSPACE:?set ONELAKE_WORKSPACE}"
 ROOT="${ONELAKE_ROOT:?set ONELAKE_ROOT}"
 : "${ONELAKE_TOKEN:?set ONELAKE_TOKEN}"
 ROWS="${DUCKDB_OBJFS_E2E_ROWS:-1000000}"
+# The azure extension's curl transport needs to be told where the CA bundle is.
+export CURL_CA_INFO="${CURL_CA_INFO:-/etc/ssl/certs/ca-certificates.crt}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -117,6 +119,7 @@ LAKE_DATA="az://onelake.blob.fabric.microsoft.com/${WORKSPACE}/${ROOT}/lake_data
 run_phase ducklake_write <<EOF
 INSTALL ducklake;
 LOAD ducklake;
+SET azure_transport_option_type = 'curl';
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (DATA_PATH '${LAKE_DATA}');
 CREATE TABLE lake.t AS SELECT range AS i FROM range(100000);
 INSERT INTO lake.t SELECT range AS i FROM range(100000, 100100);
@@ -126,6 +129,7 @@ EOF
 
 run_phase ducklake_read <<EOF
 LOAD ducklake;
+SET azure_transport_option_type = 'curl';
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
 SELECT CASE WHEN count(*) = 100100 THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END FROM lake.t;
 SELECT count(*) AS rows_at_first_data_snapshot
