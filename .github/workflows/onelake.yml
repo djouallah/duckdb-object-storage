@@ -100,3 +100,14 @@ jobs:
           echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
       - name: OneLake e2e
         run: bash test/azure/run_e2e.sh
+      - name: DuckLake on OneLake (test/azure/test.sql)
+        if: always() && env.ONELAKE_TOKEN != ''
+        run: |
+          status=0
+          CURL_CA_INFO=/etc/ssl/certs/ca-certificates.crt build/release/duckdb -bail -f test/azure/test.sql 2>&1 | tee ducklake.log || status=$?
+          {
+            echo "## DuckLake on OneLake (test/azure/test.sql)"
+            [ -s ducklake_checks.md ] && cat ducklake_checks.md
+            if [ $status -ne 0 ]; then echo '```'; grep -a -i error ducklake.log | tail -n 5; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
