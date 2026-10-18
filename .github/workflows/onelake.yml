@@ -5,6 +5,7 @@ name: onelake
 on:
   push:
     branches: [onelake-azblob]
+    paths-ignore: ['test/local/**', '.github/workflows/local-repro.yml']
   workflow_dispatch:
 
 permissions:

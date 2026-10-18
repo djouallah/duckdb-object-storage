@@ -1,0 +1,42 @@
+name: local-repro
+
+# Bug reproductions on the local backend (plain disk). Reuses the duckdb binary the onelake workflow
+# cached for the same sources; never builds.
+on:
+  push:
+    branches: [onelake-azblob]
+    paths: ['test/local/**', '.github/workflows/local-repro.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OVERRIDE_GIT_DESCRIBE: v1.5.6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build cache key
+        id: key
+        run: |
+          echo "submodules=$(git ls-tree HEAD duckdb extension-ci-tools | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore duckdb binary
+        uses: actions/cache/restore@v4
+        with:
+          path: build/release/duckdb
+          key: duckdb-release-${{ steps.key.outputs.submodules }}-${{ hashFiles('src/**', 'rust/src/**', 'rust/include/**', 'rust/Cargo.toml', 'rust/build.rs', 'rust/proto/**', 'CMakeLists.txt', 'extension_config.cmake', 'Makefile', 'test/sql/**') }}
+          fail-on-cache-miss: true
+      - name: Repros (test/local/repro.sh)
+        env:
+          REPRO_WORK_DIR: ${{ runner.temp }}/repro
+        run: bash test/local/repro.sh
+      - name: Upload repro logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-logs
+          path: ${{ runner.temp }}/repro
+          if-no-files-found: ignore
