@@ -147,6 +147,72 @@ INSERT INTO checks SELECT 'rows after checkpoint + reopen', '$((ROWS + 1000))', 
 DETACH obj;
 EOF
 
+# Accidental second writer: A attaches and commits; B attaches read-write while A is still open and
+# commits (fencing A); A then tries to commit again. The database must stay consistent: A's first
+# commit and B's rows survive, A's late write does not, and the database still opens.
+wait_for() {
+	for _ in $(seq 1 240); do
+		[[ -f "$1" ]] && return 0
+		sleep 0.5
+	done
+	return 1
+}
+A_IN="${WORK_DIR}/writer_a.in"
+A_LOG="${WORK_DIR}/writer_a.log"
+mkfifo "${A_IN}"
+"${DUCKDB_BIN}" <"${A_IN}" >"${A_LOG}" 2>&1 &
+A_PID=$!
+exec 3>"${A_IN}"
+preamble >&3
+cat >&3 <<EOF
+ATTACH 'duckdb_objfs://e2e.db' AS obj;
+INSERT INTO obj.items SELECT range, 'writer_a' FROM range(10000000, 10001000);
+COPY (SELECT 1) TO '${WORK_DIR}/writer_a_committed.csv';
+EOF
+if wait_for "${WORK_DIR}/writer_a_committed.csv"; then
+	echo "### ✅ writer A attached read-write and committed 1000 rows" >>"${SUMMARY}"
+else
+	echo "### ❌ writer A never committed" >>"${SUMMARY}"
+	FAILED+=("writer_a")
+fi
+
+run_phase second_writer <<EOF
+ATTACH 'duckdb_objfs://e2e.db' AS obj;
+INSERT INTO checks SELECT 'B sees A''s commit', '1000', count(*)::VARCHAR FROM obj.items WHERE payload = 'writer_a';
+INSERT INTO obj.items SELECT range, 'writer_b' FROM range(20000000, 20000500);
+CHECKPOINT obj;
+DETACH obj;
+EOF
+
+cat >&3 <<EOF
+.print LATE_WRITE_BEGIN
+INSERT INTO obj.items SELECT range, 'writer_a_late' FROM range(30000000, 30001000);
+CHECKPOINT obj;
+COPY (SELECT 1) TO '${WORK_DIR}/writer_a_done.csv';
+.quit
+EOF
+exec 3>&-
+wait_for "${WORK_DIR}/writer_a_done.csv" || kill -9 "${A_PID}" 2>/dev/null || true
+wait "${A_PID}" 2>/dev/null || true
+A_REJECTED=false
+sed -n '/LATE_WRITE_BEGIN/,$p' "${A_LOG}" | grep -qi "error" && A_REJECTED=true
+echo "=== writer A after takeover:"
+sed -n '/LATE_WRITE_BEGIN/,$p' "${A_LOG}" | grep -ai "error" | head -n 3 || true
+
+run_phase after_second_writer <<EOF
+ATTACH 'duckdb_objfs://e2e.db' AS obj;
+INSERT INTO checks VALUES ('A''s late write rejected with an error', 'true', '${A_REJECTED}');
+INSERT INTO checks SELECT 'A''s first commit kept', '1000', count(*)::VARCHAR FROM obj.items WHERE payload = 'writer_a';
+INSERT INTO checks SELECT 'B''s commit kept', '500', count(*)::VARCHAR FROM obj.items WHERE payload = 'writer_b';
+INSERT INTO checks SELECT 'A''s late write absent', '0', count(*)::VARCHAR FROM obj.items WHERE payload = 'writer_a_late';
+INSERT INTO checks SELECT 'total rows', '$((ROWS + 2500))', count(*)::VARCHAR FROM obj.items;
+CHECKPOINT obj;
+DETACH obj;
+ATTACH 'duckdb_objfs://e2e.db' AS obj (READ_ONLY);
+INSERT INTO checks SELECT 'total rows after checkpoint + reopen', '$((ROWS + 2500))', count(*)::VARCHAR FROM obj.items;
+DETACH obj;
+EOF
+
 echo "=== OneLake objects under ${WORKSPACE}/${ROOT}"
 curl -sf -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
 	"https://onelake.blob.fabric.microsoft.com/${WORKSPACE}?restype=container&comp=list&prefix=${ROOT}/" |
