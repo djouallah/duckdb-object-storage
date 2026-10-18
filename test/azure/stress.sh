@@ -717,17 +717,18 @@ FROM obj.big;
 DETACH obj;
 EOF
 
-# ---------------------------------------------------------------- 9. bad_token (informational)
-# A wrong token must fail fast rather than retry forever.
+# ---------------------------------------------------------------- 9. bad_token
+# A wrong token must fail, not retry forever: retries are capped at about a minute
+# (OBJECT_STORE_MAX_RETRIES in rust/src/fs.rs).
 BT_SQL="${WORK_DIR}/bad_token.sql"
 preamble | sed "s/getenv('ONELAKE_TOKEN')/'not-a-valid-token'/" >"${BT_SQL}"
 echo "ATTACH 'duckdb_objfs://${CR_DB}' AS obj (READ_ONLY);" >>"${BT_SQL}"
 start=${SECONDS} status=0
-timeout -s KILL 120 "${DUCKDB_BIN}" -bail -f "${BT_SQL}" >"${WORK_DIR}/bad_token.log" 2>&1 || status=$?
+timeout -s KILL 300 "${DUCKDB_BIN}" -bail -f "${BT_SQL}" >"${WORK_DIR}/bad_token.log" 2>&1 || status=$?
 case ${status} in
-137) info "bad_token: **hung**, killed after 120 s (informational)" ;;
-0) info "bad_token: **ATTACH succeeded with an invalid token** (informational)" ;;
-*) info "bad_token: failed in $((SECONDS - start)) s: $(grep -a -i -m1 error "${WORK_DIR}/bad_token.log" | cut -c1-200 || true)" ;;
+137) fail bad_token "ATTACH with an invalid token hung, killed after 300 s" ;;
+0) fail bad_token "ATTACH succeeded with an invalid token" ;;
+*) info "### ✅ bad_token: ATTACH failed in $((SECONDS - start)) s: $(grep -a -i -m1 error "${WORK_DIR}/bad_token.log" | cut -c1-200 || true)" ;;
 esac
 
 echo

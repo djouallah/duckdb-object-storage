@@ -30,6 +30,12 @@ pub const NAME: &str = "SlateDBFileSystem";
 /// them onto each other, so they live in the database file's SlateDB.
 const DATABASE_COMPANION_SUFFIXES: [&str; 3] = [".wal", ".wal.checkpoint", ".wal.recovery"];
 
+/// SlateDB retries a failing object-store call forever by default, and it
+/// treats rejected credentials as transient (slatedb/slatedb#2182,
+/// apache/opendal#8416), so an invalid or expired token would hang every call.
+/// With SlateDB's 100 ms to 1 s backoff, 60 retries give up after about a minute.
+const OBJECT_STORE_MAX_RETRIES: u32 = 60;
+
 /// SlateDB-backed filesystem owner.
 ///
 /// Every database file gets its own SlateDB, shared with its companion files,
@@ -429,6 +435,7 @@ impl SlateDbFileSystem {
     async fn open_writer(&self, group: &str) -> Result<Arc<Db>> {
         let settings = Settings {
             object_store_cache_options: self.cache_config.object_store_cache_options(),
+            object_store_max_retries: Some(OBJECT_STORE_MAX_RETRIES),
             ..Settings::default()
         };
         let mut builder = Db::builder(self.slatedb_path(group), Arc::clone(&self.object_store))
@@ -447,6 +454,7 @@ impl SlateDbFileSystem {
     async fn open_reader(&self, group: &str) -> Result<Option<Arc<DbReader>>> {
         let options = DbReaderOptions {
             object_store_cache_options: self.cache_config.object_store_cache_options(),
+            object_store_max_retries: Some(OBJECT_STORE_MAX_RETRIES),
             ..DbReaderOptions::default()
         };
         let mut builder =
