@@ -28,7 +28,6 @@ fi
 preamble() {
 	cat <<EOF
 .timer on
-SET GLOBAL azure_transport_option_type = 'curl';
 CREATE OR REPLACE SECRET onelake (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN getenv('ONELAKE_TOKEN'));
 SET duckdb_objfs_backend = 'azure';
 SET duckdb_objfs_bucket = '${WORKSPACE}';
