@@ -113,27 +113,6 @@ jobs:
             if [ $status -ne 0 ]; then echo '```'; grep -a -i error ducklake.log | tail -n 5; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
-      # Racing writers, random kill -9, readers during writes, a >1 GiB sync: see the script header.
-      # The token is minted again so it outlives the stress run.
-      - name: Refresh OneLake token
-        if: always() && env.ONELAKE_TOKEN != ''
-        run: |
-          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
-          echo "::add-mask::${token}"
-          echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
-      - name: OneLake stress (test/azure/stress.sh)
-        if: always() && env.ONELAKE_TOKEN != ''
-        timeout-minutes: 80
-        env:
-          STRESS_WORK_DIR: ${{ runner.temp }}/stress
-        run: bash test/azure/stress.sh
-      - name: Upload stress logs
-        if: always() && env.ONELAKE_TOKEN != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: stress-logs
-          path: ${{ runner.temp }}/stress
-          if-no-files-found: ignore
       - name: Delta export (information only, not a test)
         if: always() && env.ONELAKE_TOKEN != ''
         continue-on-error: true

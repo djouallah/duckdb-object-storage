@@ -32,7 +32,7 @@ jobs:
       OVERRIDE_GIT_DESCRIBE: v1.5.6
     steps:
       - uses: actions/checkout@v4
-      # One OneLake client at a time: the stress test in onelake.yml would skew the timings. Waiting
+      # One OneLake client at a time: the onelake e2e run would skew the timings. Waiting
       # also lets that run build and cache the duckdb binary, restored below.
       - name: Wait for the onelake workflow on this commit
         env:
