@@ -1,12 +1,15 @@
 name: benchmarks
 
-# POC: TPC-H SF10 on DuckLake in live OneLake (catalog in a duckdb_objfs database, parquet in the
-# lakehouse Tables/ section). Timings go to the job summary; see test/azure/LEARNING.md.
-# Same OIDC app and workspace as onelake.yml.
+# POC, manual only: TPC-H SF10 on DuckLake in live OneLake (catalog in a duckdb_objfs database,
+# parquet in the lakehouse Tables/ section), with the duckdb binary from a build.yml run.
+# Timings go to the job summary; see test/azure/LEARNING.md.
 on:
-  push:
-    branches: [onelake-azblob]
   workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'build run whose duckdb artifact to use (default: latest successful build on the branch)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -25,53 +28,32 @@ env:
 jobs:
   tpch:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-    env:
-      GEN: ninja
-      # Shallow submodules carry no tags; pin the version so INSTALL azure resolves.
-      OVERRIDE_GIT_DESCRIBE: v1.5.6
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      # One OneLake client at a time: the onelake e2e run would skew the timings. Waiting
-      # also lets that run build and cache the duckdb binary, restored below.
-      - name: Wait for the onelake workflow on this commit
+      # The binary comes from a build run: the one given, or the latest successful one on this branch.
+      - name: Pick build run
+        id: build
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.build_run_id }}
         run: |
-          for _ in $(seq 1 300); do
-            busy=$(gh run list -R "$GITHUB_REPOSITORY" -w onelake --commit "$GITHUB_SHA" --json status \
-              --jq '[.[] | select(.status != "completed")] | length')
-            [ "${busy}" = 0 ] && exit 0
-            sleep 30
-          done
-          echo "onelake workflow still running after 150 minutes" >&2
-          exit 1
-      # Same key as onelake.yml, so the binary it cached is reused.
-      - name: Build cache key
-        id: key
-        run: |
-          echo "submodules=$(git ls-tree HEAD duckdb extension-ci-tools | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      - name: Restore duckdb binary
-        id: build-cache
-        uses: actions/cache@v4
+          if [ -z "${RUN_ID}" ]; then
+            RUN_ID=$(gh run list -R "$GITHUB_REPOSITORY" -w build --branch "$GITHUB_REF_NAME" --status success -L 1 \
+              --json databaseId --jq '.[0].databaseId')
+          fi
+          [ -n "${RUN_ID}" ] || { echo "no successful build run on ${GITHUB_REF_NAME}" >&2; exit 1; }
+          sha=$(gh run view "${RUN_ID}" -R "$GITHUB_REPOSITORY" --json headSha --jq .headSha)
+          echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "duckdb binary from build run [${RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}) at \`${sha:0:7}\`" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/download-artifact@v4
         with:
-          path: build/release/duckdb
-          key: duckdb-release-${{ steps.key.outputs.submodules }}-${{ hashFiles('src/**', 'rust/src/**', 'rust/include/**', 'rust/Cargo.toml', 'rust/build.rs', 'rust/proto/**', 'CMakeLists.txt', 'extension_config.cmake', 'Makefile', 'test/sql/**') }}
-      - name: Checkout submodules
-        if: steps.build-cache.outputs.cache-hit != 'true'
-        run: git submodule update --init --recursive --depth 1
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.build-cache.outputs.cache-hit != 'true'
-      - name: Install build tools
-        if: steps.build-cache.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - uses: hendrikmuhs/ccache-action@v1.2
-        if: steps.build-cache.outputs.cache-hit != 'true'
-        with:
-          key: extension
-      - name: Build (release)
-        if: steps.build-cache.outputs.cache-hit != 'true'
-        run: make release
+          name: duckdb
+          path: build/release
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      # Artifacts do not keep the executable bit.
+      - run: chmod +x build/release/duckdb
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:

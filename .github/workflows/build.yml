@@ -1,6 +1,8 @@
-name: onelake
+name: build
 
-# POC: the azure (OneLake) backend, verified against live OneLake.
+# POC: builds the extension (duckdb binary with duckdb_object_storage linked in), uploads it as the
+# `duckdb` artifact, and verifies the azure (OneLake) backend against live OneLake with it.
+# benchmarks.yml and stress.yml (manual) download that artifact instead of building.
 # Auth is OIDC with the fabric-github-deploy app; it needs Contributor on the target workspace.
 on:
   push:
@@ -13,7 +15,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: onelake-${{ github.ref }}
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -88,6 +90,24 @@ jobs:
       - name: Extension sqllogictests (local/memory backends)
         if: steps.build-cache.outputs.cache-hit != 'true'
         run: make test_release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duckdb
+          path: build/release/duckdb
+          if-no-files-found: error
+
+  onelake-e2e:
+    needs: extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: duckdb
+          path: build/release
+      # Artifacts do not keep the executable bit.
+      - run: chmod +x build/release/duckdb
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
