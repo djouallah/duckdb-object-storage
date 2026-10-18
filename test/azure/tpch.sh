@@ -86,10 +86,10 @@ expected_rows() {
 run_phase tpch_load ducklake < <(
 	echo "ATTACH '${CATALOG}' AS lake (DATA_PATH '${DATA_PATH}', DATA_INLINING_ROW_LIMIT 0);"
 	echo "CREATE SCHEMA IF NOT EXISTS lake.${SCHEMA};"
-	# lakehouse_benchmark's Iceberg files: 1M-row row groups, zstd. DuckDB's writer default is
+	# lakehouse_benchmark's Iceberg files use 1M-row row groups. DuckDB's writer default is
 	# 122,880 rows, 8x the row groups and so 8x the small range reads from OneLake.
 	echo "CALL lake.set_option('parquet_row_group_size', ${TPCH_ROW_GROUP_ROWS:-1048576});"
-	echo "CALL lake.set_option('parquet_compression', 'zstd');"
+	echo "CALL lake.set_option('parquet_compression', 'snappy');"
 	for t in "${TABLES[@]}"; do
 		echo "CREATE OR REPLACE TABLE lake.${SCHEMA}.${t} AS FROM read_parquet('$(parquet_of "${t}")');"
 	done
