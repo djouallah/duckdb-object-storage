@@ -1,0 +1,93 @@
+name: benchmarks
+
+# POC: TPC-H SF10 on DuckLake in live OneLake (catalog in a duckdb_objfs database, parquet in the
+# lakehouse Tables/ section). Timings go to the job summary; see test/azure/LEARNING.md.
+# Same OIDC app and workspace as onelake.yml.
+on:
+  push:
+    branches: [onelake-azblob]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ONELAKE_WORKSPACE: mimtest
+  ONELAKE_LAKEHOUSE: duckdb_objfs.Lakehouse
+  ONELAKE_ROOT: duckdb_objfs.Lakehouse/Files/duckdb_objfs
+
+jobs:
+  tpch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GEN: ninja
+      # Shallow submodules carry no tags; pin the version so INSTALL azure resolves.
+      OVERRIDE_GIT_DESCRIBE: v1.5.6
+    steps:
+      - uses: actions/checkout@v4
+      # One OneLake client at a time: the stress test in onelake.yml would skew the timings. Waiting
+      # also lets that run build and cache the duckdb binary, restored below.
+      - name: Wait for the onelake workflow on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 1 300); do
+            busy=$(gh run list -R "$GITHUB_REPOSITORY" -w onelake --commit "$GITHUB_SHA" --json status \
+              --jq '[.[] | select(.status != "completed")] | length')
+            [ "${busy}" = 0 ] && exit 0
+            sleep 30
+          done
+          echo "onelake workflow still running after 150 minutes" >&2
+          exit 1
+      # Same key as onelake.yml, so the binary it cached is reused.
+      - name: Build cache key
+        id: key
+        run: |
+          echo "submodules=$(git ls-tree HEAD duckdb extension-ci-tools | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore duckdb binary
+        id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: build/release/duckdb
+          key: duckdb-release-${{ steps.key.outputs.submodules }}-${{ hashFiles('src/**', 'rust/src/**', 'rust/include/**', 'rust/Cargo.toml', 'rust/build.rs', 'rust/proto/**', 'CMakeLists.txt', 'extension_config.cmake', 'Makefile', 'test/sql/**') }}
+      - name: Checkout submodules
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --recursive --depth 1
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.build-cache.outputs.cache-hit != 'true'
+      - name: Install build tools
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: hendrikmuhs/ccache-action@v1.2
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        with:
+          key: extension
+      - name: Build (release)
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        run: make release
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Mint OneLake token
+        run: |
+          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+          echo "::add-mask::${token}"
+          echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
+      - name: DuckLake TPC-H SF10 on OneLake (test/azure/tpch.sh)
+        timeout-minutes: 45
+        env:
+          TPCH_SF: 10
+          TPCH_WORK_DIR: ${{ runner.temp }}/tpch
+        run: |
+          pipx install tpchgen-cli
+          bash test/azure/tpch.sh
