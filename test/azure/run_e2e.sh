@@ -76,8 +76,7 @@ MARKER="${WORK_DIR}/committed.csv"
 {
 	preamble
 	cat <<EOF
-SET checkpoint_on_shutdown = false;
-SET wal_autocheckpoint = '10GB';
+SET checkpoint_threshold = '10GB';
 ATTACH 'duckdb_objfs://e2e.db' AS obj;
 INSERT INTO obj.items SELECT range AS i, 'crash' FROM range(${ROWS}, ${ROWS} + 1000);
 COPY (SELECT 1) TO '${MARKER}';
