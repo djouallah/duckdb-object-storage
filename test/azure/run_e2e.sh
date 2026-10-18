@@ -113,7 +113,7 @@ DETACH obj;
 EOF
 
 # DuckLake with its DuckDB catalog on duckdb_objfs and its Parquet data in a plain OneLake folder.
-LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${ROOT}/lake_data/"
+LAKE_DATA="az://onelake.blob.fabric.microsoft.com/${WORKSPACE}/${ROOT}/lake_data/"
 run_phase ducklake_write <<EOF
 INSTALL ducklake;
 LOAD ducklake;
