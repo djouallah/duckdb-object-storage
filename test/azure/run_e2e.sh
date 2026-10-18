@@ -112,6 +112,28 @@ FROM obj.items;
 DETACH obj;
 EOF
 
+# DuckLake with its DuckDB catalog on duckdb_objfs and its Parquet data in a plain OneLake folder.
+LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${ROOT}/lake_data/"
+run_phase ducklake_write <<EOF
+INSTALL ducklake;
+LOAD ducklake;
+ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (DATA_PATH '${LAKE_DATA}');
+CREATE TABLE lake.t AS SELECT range AS i FROM range(100000);
+INSERT INTO lake.t SELECT range AS i FROM range(100000, 100100);
+SELECT * FROM ducklake_snapshots('lake');
+DETACH lake;
+EOF
+
+run_phase ducklake_read <<EOF
+LOAD ducklake;
+ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
+SELECT CASE WHEN count(*) = 100100 THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END FROM lake.t;
+SELECT count(*) AS rows_at_first_data_snapshot
+FROM lake.t AT (VERSION => (SELECT min(snapshot_id) FROM ducklake_snapshots('lake') WHERE snapshot_id > 0));
+SELECT data_file FROM ducklake_list_files('lake', 't');
+DETACH lake;
+EOF
+
 echo "=== OneLake objects under ${WORKSPACE}/${ROOT}"
 curl -sf -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
 	"https://onelake.blob.fabric.microsoft.com/${WORKSPACE}?restype=container&comp=list&prefix=${ROOT}/" |
