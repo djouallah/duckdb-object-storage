@@ -3,15 +3,9 @@
 -- One catalog and one schema, reused by every run. Results: checks table, also written to ducklake_checks.md.
 
 .timer on
-INSTALL azure;
-LOAD azure;
-INSTALL ducklake;
-LOAD ducklake;
+-- azure, ducklake and delta autoload; delta_export is a community extension.
 INSTALL delta_export FROM community;
 LOAD delta_export;
-INSTALL delta;
-LOAD delta;
-LOAD duckdb_object_storage;
 
 SET GLOBAL azure_transport_option_type = 'curl';
 CREATE OR REPLACE SECRET onelake (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN getenv('ONELAKE_TOKEN'));
