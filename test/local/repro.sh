@@ -14,7 +14,8 @@ WORK="${REPRO_WORK_DIR:-$(mktemp -d)}"
 SECONDS_READERS="${REPRO_SECONDS:-120}"
 TRIALS="${REPRO_TRIALS:-10}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
-STORE="${WORK}/store"
+# The store stays out of WORK, which CI uploads.
+STORE="${REPRO_STORE_DIR:-$(mktemp -d)}"
 mkdir -p "${WORK}" "${STORE}"
 PIDS=()
 trap 'for p in "${PIDS[@]}"; do kill -9 "$p" 2>/dev/null; done' EXIT
@@ -176,7 +177,9 @@ abort_trial() { # abort_trial <kind> <n>: prints A's exit status and how it ende
 	else
 		how="$(grep -a -i -m1 -E '(^|[^a-z])error' "${a}.log" | cut -c1-200)"
 	fi
-	echo "${kind} trial ${n}: A exit ${status}, B exit ${b_status}: ${how}"
+	local b_how
+	b_how="$(grep -a -m1 -E 'what()|(^|[^a-z])[Ee]rror' "${b}.log" | cut -c1-200)"
+	echo "${kind} trial ${n}: A exit ${status}: ${how} | B exit ${b_status}: ${b_how:-ok}"
 }
 ABORTS=0
 for kind in plain ducklake; do
