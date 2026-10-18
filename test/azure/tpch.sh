@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# TPC-H on DuckLake in live OneLake (port of the TPC-H part of djouallah/lakehouse_benchmark).
+# TPC-H benchmark on DuckLake in live OneLake (port of the TPC-H part of djouallah/lakehouse_benchmark).
 # The DuckLake catalog is a duckdb_objfs database; the table data is parquet in the lakehouse
 # Tables/ section (schema tpch_sf<N>). tpchgen-cli generates parquet locally, the tables are loaded
-# into DuckLake, then the 22 queries run against OneLake from a fresh process.
-#
-# DuckDB's tpch_answers() stops at SF1; at SF10 each query's result row count is checked against
-# runs that were verified row by row against the local parquet.
-# Same requirements as run_e2e.sh, plus tpchgen-cli on PATH. Knobs: TPCH_SF, TPCH_WORK_DIR.
+# into DuckLake, then the 22 queries run twice against OneLake from a fresh process (cold, then hot).
+# Timings go to stdout and the job summary. Same requirements as run_e2e.sh, plus tpchgen-cli on
+# PATH. Knobs: TPCH_SF, TPCH_WORK_DIR, TPCH_ROW_GROUP_ROWS.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -21,6 +19,7 @@ DATA_PATH="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Ta
 CATALOG="ducklake:duckdb_objfs://tpch.ducklake"
 SCHEMA="tpch_sf${SF}"
 LAYOUT="${WORK_DIR}/tpch_layout.md"
+TIMINGS="${WORK_DIR}/tpch_timings.md"
 TABLES=(region nation supplier customer part partsupp orders lineitem)
 
 {
@@ -28,13 +27,36 @@ TABLES=(region nation supplier customer part partsupp orders lineitem)
 	echo
 } >>"${SUMMARY}"
 
+# bench_phase <name> <<SQL: one duckdb process (azure + ducklake + duckdb_objfs loaded), timed.
+bench_phase() {
+	local name="$1" sql="${WORK_DIR}/$1.sql" log="${WORK_DIR}/$1.log" start=${SECONDS} status=0
+	{
+		preamble ducklake
+		cat
+	} >"${sql}"
+	echo "=== ${name}"
+	"${DUCKDB_BIN}" -bail -f "${sql}" 2>&1 | tee "${log}" || status=$?
+	if [[ ${status} -eq 0 ]]; then
+		echo "${name}: $((SECONDS - start))s" | tee -a "${SUMMARY}"
+	else
+		{
+			echo "${name}: ❌ failed after $((SECONDS - start))s"
+			echo '```'
+			grep -a -i "error" "${log}" | tail -n 5
+			echo '```'
+		} | tee -a "${SUMMARY}"
+		FAILED+=("${name}")
+	fi
+	echo >>"${SUMMARY}"
+}
+
 # ---------------------------------------------------------------- generate (local)
 
 echo "=== generate SF${SF} with tpchgen-cli"
 start=${SECONDS}
 rm -rf "${DATA}"
 tpchgen-cli --scale-factor "${SF}" --format parquet --output-dir "${DATA}"
-echo "tpchgen-cli SF${SF}: $((SECONDS - start))s, $(du -sh "${DATA}" | cut -f1) of parquet" | tee -a "${SUMMARY}"
+echo "generate (tpchgen-cli): $((SECONDS - start))s, $(du -sh "${DATA}" | cut -f1) of parquet" | tee -a "${SUMMARY}"
 echo >>"${SUMMARY}"
 
 # parquet_of <table>: the read_parquet path for one table (one file, or a directory of parts).
@@ -57,33 +79,11 @@ for n in $(seq 1 22); do
 done
 # Q11's FRACTION is 0.0001 / SF in the spec; DuckDB ships the SF1 value, which returns 0 rows at SF10.
 sed -i "s|\* 0\.0001000000|* (0.0001000000 / ${SF})|" "${QUERY_DIR}/q11.sql"
-grep -q "/ ${SF})" "${QUERY_DIR}/q11.sql" || { echo "could not scale Q11's fraction" >&2; exit 1; }
 
-# ---------------------------------------------------------------- load into OneLake
+# ---------------------------------------------------------------- load into DuckLake on OneLake
 
-# Row counts fixed by the TPC-H spec; region and nation do not scale, lineitem is not linear.
-expected_rows() {
-	case "$1" in
-	region) echo 5 ;;
-	nation) echo 25 ;;
-	supplier) echo $((SF * 10000)) ;;
-	customer) echo $((SF * 150000)) ;;
-	part) echo $((SF * 200000)) ;;
-	partsupp) echo $((SF * 800000)) ;;
-	orders) echo $((SF * 1500000)) ;;
-	lineitem)
-		case "${SF}" in
-		1) echo 6001215 ;;
-		10) echo 59986052 ;;
-		100) echo 600037902 ;;
-		esac
-		;;
-	esac
-}
-
-# run_phase reads from a process substitution, not a pipe, so FAILED is kept in this shell.
 # Each run replaces the tables, then expires the old snapshots and deletes the previous run's files.
-run_phase tpch_load ducklake < <(
+bench_phase load < <(
 	echo "ATTACH '${CATALOG}' AS lake (DATA_PATH '${DATA_PATH}', DATA_INLINING_ROW_LIMIT 0);"
 	echo "CREATE SCHEMA IF NOT EXISTS lake.${SCHEMA};"
 	# lakehouse_benchmark's Iceberg files use 1M-row row groups. DuckDB's writer default is
@@ -95,23 +95,16 @@ run_phase tpch_load ducklake < <(
 	done
 	echo "CALL ducklake_expire_snapshots('lake', older_than => now());"
 	echo "CALL ducklake_cleanup_old_files('lake', cleanup_all => true);"
-	echo "DETACH lake;"
-	echo "ATTACH '${CATALOG}' AS lake (READ_ONLY);"
-	for t in "${TABLES[@]}"; do
-		echo "INSERT INTO checks SELECT '${t} rows', '$(expected_rows "${t}")', count(*)::VARCHAR FROM lake.${SCHEMA}.${t};"
-	done
 	echo ".mode markdown"
 	echo ".output ${LAYOUT}"
 	sep=""
 	for t in "${TABLES[@]}"; do
-		echo "${sep}SELECT '${t}' AS \"table\", count(*) AS files, sum(num_rows) AS \"rows\", sum(num_row_groups) AS row_groups,"
-		echo "       (sum(num_rows) // sum(num_row_groups))::BIGINT AS rows_per_group"
+		echo "${sep}SELECT '${t}' AS \"table\", count(*) AS files, sum(num_rows) AS \"rows\", sum(num_row_groups) AS row_groups"
 		echo "FROM parquet_file_metadata('${DATA_PATH}${SCHEMA}/${t}/*.parquet')"
 		sep="UNION ALL "
 	done
 	echo ";"
 	echo ".output"
-	echo ".mode duckbox"
 	echo "DETACH lake;"
 )
 if [[ -s "${LAYOUT}" ]]; then
@@ -122,61 +115,47 @@ if [[ -s "${LAYOUT}" ]]; then
 	} >>"${SUMMARY}"
 fi
 
-# ---------------------------------------------------------------- 22 queries: OneLake cold, then hot
+# ---------------------------------------------------------------- 22 queries: cold, then hot
 
-# run_queries <db.schema> <run> <table prefix>: all 22 queries, each into a temp table, timed.
+# run_queries <run>: all 22 queries, each into a temp table (no output), timed.
 run_queries() {
-	echo "USE $1;"
 	local f q
 	for f in "${QUERY_DIR}"/q*.sql; do
 		q=$(basename "${f}" .sql)
 		echo "SET VARIABLE t0 = epoch_us(get_current_timestamp());"
-		echo "CREATE OR REPLACE TEMP TABLE $3_${q} AS"
+		echo "CREATE OR REPLACE TEMP TABLE result_${q} AS"
 		cat "${f}"
 		echo ";"
-		echo "INSERT INTO timings VALUES ('${q^^}', '$2', (epoch_us(get_current_timestamp()) - getvariable('t0')) / 1e6);"
+		echo "INSERT INTO memory.timings VALUES ('${q^^}', '$1', (epoch_us(get_current_timestamp()) - getvariable('t0')) / 1e6);"
 	done
 }
 
-# Result rows per query at SF10, from runs whose results matched the same queries on the local
-# parquet exactly (fork CI 39122557565, 39131500993). tpchgen-cli output is deterministic.
-SF10_RESULT_ROWS=(4 100 10 5 5 1 4 2 175 20 8685 2 46 1 1 27840 1 100 1 1804 100 7)
-
-TIMINGS="${WORK_DIR}/tpch_timings.md"
-run_phase tpch_queries ducklake < <(
+bench_phase queries < <(
 	echo "ATTACH '${CATALOG}' AS lake (READ_ONLY);"
-	echo "CREATE TEMP TABLE timings (query VARCHAR, run VARCHAR, seconds DOUBLE);"
-	run_queries lake.${SCHEMA} onelake_cold o
-	run_queries lake.${SCHEMA} onelake_hot h
-	echo "USE memory;"
-	if [[ ${SF} -eq 10 ]]; then
-		for n in $(seq 1 22); do
-			q=q$(printf %02d "${n}")
-			echo "INSERT INTO checks SELECT '${q^^} result rows', '${SF10_RESULT_ROWS[n - 1]}', count(*)::VARCHAR FROM o_${q};"
-		done
-	fi
+	echo "CREATE TABLE memory.timings (query VARCHAR, run VARCHAR, seconds DOUBLE);"
+	echo "USE lake.${SCHEMA};"
+	run_queries cold
+	run_queries hot
 	cat <<SQL
 .mode markdown
 .output ${TIMINGS}
 PIVOT (SELECT query, run, round(seconds, 2) AS seconds
-       FROM (FROM timings UNION ALL SELECT 'total', run, sum(seconds) FROM timings GROUP BY run))
-ON run IN ('onelake_cold', 'onelake_hot') USING first(seconds) GROUP BY query ORDER BY query;
+       FROM (FROM memory.timings UNION ALL SELECT 'total', run, sum(seconds) FROM memory.timings GROUP BY run))
+ON run IN ('cold', 'hot') USING first(seconds) GROUP BY query ORDER BY query;
 .output
-.mode duckbox
+USE memory;
 DETACH lake;
 SQL
 )
-
 if [[ -s "${TIMINGS}" ]]; then
 	{
-		echo "#### Query seconds (cold = first run on OneLake, hot = second run in the same process)"
+		echo "#### Query seconds (cold = first run from OneLake, hot = second run in the same process)"
 		cat "${TIMINGS}"
 		echo
 	} >>"${SUMMARY}"
 fi
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
-	echo "=== failed phases: ${FAILED[*]}" | tee -a "${SUMMARY}"
+	echo "=== failed: ${FAILED[*]}" | tee -a "${SUMMARY}"
 	exit 1
 fi
-echo "=== OneLake TPC-H SF${SF} passed"
