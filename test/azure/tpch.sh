@@ -96,11 +96,11 @@ run_queries() {
 	local f q
 	for f in "${QUERY_DIR}"/q*.sql; do
 		q=$(basename "${f}" .sql)
-		echo "SET VARIABLE t0 = get_current_timestamp();"
+		echo "SET VARIABLE t0 = epoch_us(get_current_timestamp());"
 		echo "CREATE OR REPLACE TEMP TABLE $3_${q} AS"
 		cat "${f}"
 		echo ";"
-		echo "INSERT INTO timings VALUES ('${q^^}', '$2', epoch(get_current_timestamp() - getvariable('t0')));"
+		echo "INSERT INTO timings VALUES ('${q^^}', '$2', (epoch_us(get_current_timestamp()) - getvariable('t0')) / 1e6);"
 	done
 }
 
