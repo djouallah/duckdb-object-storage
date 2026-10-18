@@ -54,7 +54,7 @@ SET VARIABLE first_insert_snapshot = (SELECT max(snapshot_id) FROM ducklake_snap
 SET VARIABLE first_insert_time = (SELECT max(snapshot_time) FROM ducklake_snapshots('lake'));
 
 INSERT INTO test_sales SELECT * FROM sales_batch(100000, 150000);
-UPDATE test_sales SET discount = 0.5 WHERE region = 'north' AND quantity = 20;
+UPDATE test_sales SET discount = 0.5 WHERE region = 'west' AND quantity = 20;
 DELETE FROM test_sales WHERE sale_id % 97 = 0;  -- 1547 rows
 SET VARIABLE delete_snapshot = (SELECT max(snapshot_id) FROM ducklake_snapshots('lake'));
 
@@ -66,7 +66,7 @@ INSERT INTO checks SELECT 'rollback leaves rows', '148453', count(*)::VARCHAR FR
 ALTER TABLE test_sales ADD COLUMN channel VARCHAR;
 INSERT INTO test_sales SELECT *, CASE WHEN is_online THEN 'web' ELSE 'store' END FROM sales_batch(150000, 160000);
 
--- Upsert: update ids 1000..1499 that still exist (495), insert 160000..160499 (500).
+-- Upsert: update ids 1000..1499 that still exist (495); insert the 5 deleted ones and 160000..160499 (505).
 MERGE INTO test_sales AS target
 USING (SELECT * FROM sales_batch(1000, 1500) UNION ALL SELECT * FROM sales_batch(160000, 160500)) AS source
 ON target.sale_id = source.sale_id
@@ -109,7 +109,7 @@ DETACH lake;
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
 USE lake.ducklake_test;
 
-INSERT INTO checks SELECT 'test_sales rows', '158953', count(*)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'test_sales rows', '158958', count(*)::VARCHAR FROM test_sales;
 INSERT INTO checks SELECT 'time travel by version', '100000', count(*)::VARCHAR
 FROM test_sales AT (VERSION => getvariable('first_insert_snapshot'));
 INSERT INTO checks SELECT 'time travel by timestamp', '100000', count(*)::VARCHAR
@@ -123,10 +123,10 @@ FROM ducklake_table_changes('lake', 'ducklake_test', 'test_sales',
                             getvariable('delete_snapshot'), getvariable('delete_snapshot'))
 WHERE change_type = 'delete';
 INSERT INTO checks SELECT 'update applied', 'true', (count(*) > 0)::VARCHAR FROM test_sales WHERE discount = 0.5;
-INSERT INTO checks SELECT 'merge inserted', '500', count(*)::VARCHAR FROM test_sales WHERE channel = 'merge';
+INSERT INTO checks SELECT 'merge inserted', '505', count(*)::VARCHAR FROM test_sales WHERE channel = 'merge';
 INSERT INTO checks SELECT 'merge updated', '495', count(*)::VARCHAR
 FROM test_sales WHERE sale_id BETWEEN 1000 AND 1499 AND quantity = 999;
-INSERT INTO checks SELECT 'added column filled', '10500', count(channel)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'added column filled', '10505', count(channel)::VARCHAR FROM test_sales;
 INSERT INTO checks SELECT 'partitions (region)', 'east,north,south,west',
     string_agg(DISTINCT regexp_extract(data_file, 'region=([^/]+)', 1), ','
                ORDER BY regexp_extract(data_file, 'region=([^/]+)', 1))
@@ -158,6 +158,9 @@ DETACH lake;
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (METADATA_CATALOG '__ducklake_metadata_lake');
 USE lake.ducklake_test;
 
+-- delta_export() only sees data files, not DuckLake delete files: rewrite them away first.
+CALL ducklake_rewrite_data_files('lake');
+INSERT INTO checks SELECT 'rows after rewriting deletes', '158958', count(*)::VARCHAR FROM test_sales;
 SET VARIABLE files_before = (SELECT count(*) FROM ducklake_list_files('lake', 'test_sales', schema => 'ducklake_test'));
 CALL ducklake_merge_adjacent_files('lake');
 INSERT INTO checks SELECT 'compaction (data files)', 'fewer',
@@ -167,12 +170,12 @@ FROM ducklake_list_files('lake', 'test_sales', schema => 'ducklake_test');
 CALL ducklake_expire_snapshots('lake', older_than => now());
 CALL ducklake_cleanup_old_files('lake', cleanup_all => true);
 INSERT INTO checks SELECT 'snapshots after expire', '1', count(*)::VARCHAR FROM ducklake_snapshots('lake');
-INSERT INTO checks SELECT 'rows after maintenance', '158953', count(*)::VARCHAR FROM test_sales;
+INSERT INTO checks SELECT 'rows after maintenance', '158958', count(*)::VARCHAR FROM test_sales;
 
 ---------------------------------------------------------------- Delta export, read back with delta_scan
 
 CALL delta_export();  -- writes each table's _delta_log next to its Parquet
-INSERT INTO checks SELECT 'delta test_sales rows', '158953', count(*)::VARCHAR
+INSERT INTO checks SELECT 'delta test_sales rows', '158958', count(*)::VARCHAR
 FROM delta_scan('abfss://mimtest@onelake.dfs.fabric.microsoft.com/duckdb_objfs.Lakehouse/Tables/ducklake_test/test_sales');
 INSERT INTO checks SELECT 'delta = ducklake, row for row', '0', (
     SELECT count(*) FROM (

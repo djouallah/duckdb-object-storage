@@ -102,7 +102,7 @@ EOF
 run_phase read_only <<EOF
 ATTACH 'duckdb_objfs://e2e.db' AS obj (READ_ONLY);
 INSERT INTO checks SELECT 'rows after reopen', '${ROWS}', count(*)::VARCHAR FROM obj.items;
-INSERT INTO checks SELECT 'sum after reopen', (${ROWS}::HUGEINT * (${ROWS} - 1) / 2)::VARCHAR, sum(i)::VARCHAR FROM obj.items;
+INSERT INTO checks SELECT 'sum after reopen', (${ROWS}::HUGEINT * (${ROWS} - 1) // 2)::VARCHAR, sum(i)::VARCHAR FROM obj.items;
 INSERT INTO checks SELECT 'point lookup', md5('4242'), payload FROM obj.items WHERE i = 4242;
 DETACH obj;
 EOF
