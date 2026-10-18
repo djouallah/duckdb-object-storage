@@ -20,6 +20,7 @@ LAKEHOUSE="${ONELAKE_LAKEHOUSE:-${ROOT%%/*}}"
 DATA_PATH="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Tables/"
 CATALOG="ducklake:duckdb_objfs://tpch.ducklake"
 SCHEMA="tpch_sf${SF}"
+LAYOUT="${WORK_DIR}/tpch_layout.md"
 TABLES=(region nation supplier customer part partsupp orders lineitem)
 
 {
@@ -85,6 +86,10 @@ expected_rows() {
 run_phase tpch_load ducklake < <(
 	echo "ATTACH '${CATALOG}' AS lake (DATA_PATH '${DATA_PATH}', DATA_INLINING_ROW_LIMIT 0);"
 	echo "CREATE SCHEMA IF NOT EXISTS lake.${SCHEMA};"
+	# lakehouse_benchmark's Iceberg files: 1M-row row groups, zstd. DuckDB's writer default is
+	# 122,880 rows, 8x the row groups and so 8x the small range reads from OneLake.
+	echo "CALL lake.set_option('parquet_row_group_size', ${TPCH_ROW_GROUP_ROWS:-1048576});"
+	echo "CALL lake.set_option('parquet_compression', 'zstd');"
 	for t in "${TABLES[@]}"; do
 		echo "CREATE OR REPLACE TABLE lake.${SCHEMA}.${t} AS FROM read_parquet('$(parquet_of "${t}")');"
 	done
@@ -95,8 +100,27 @@ run_phase tpch_load ducklake < <(
 	for t in "${TABLES[@]}"; do
 		echo "INSERT INTO checks SELECT '${t} rows', '$(expected_rows "${t}")', count(*)::VARCHAR FROM lake.${SCHEMA}.${t};"
 	done
+	echo ".mode markdown"
+	echo ".output ${LAYOUT}"
+	sep=""
+	for t in "${TABLES[@]}"; do
+		echo "${sep}SELECT '${t}' AS \"table\", count(*) AS files, sum(num_rows) AS \"rows\", sum(num_row_groups) AS row_groups,"
+		echo "       (sum(num_rows) // sum(num_row_groups))::BIGINT AS rows_per_group"
+		echo "FROM parquet_file_metadata('${DATA_PATH}${SCHEMA}/${t}/*.parquet')"
+		sep="UNION ALL "
+	done
+	echo ";"
+	echo ".output"
+	echo ".mode duckbox"
 	echo "DETACH lake;"
 )
+if [[ -s "${LAYOUT}" ]]; then
+	{
+		echo "#### Parquet layout written by DuckLake"
+		cat "${LAYOUT}"
+		echo
+	} >>"${SUMMARY}"
+fi
 
 # ---------------------------------------------------------------- 22 queries: OneLake cold, hot, local
 
