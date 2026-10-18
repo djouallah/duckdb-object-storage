@@ -7,82 +7,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DUCKDB_BIN="${DUCKDB_BIN:-${ROOT_DIR}/build/release/duckdb}"
-WORKSPACE="${ONELAKE_WORKSPACE:?set ONELAKE_WORKSPACE}"
-ROOT="${ONELAKE_ROOT:?set ONELAKE_ROOT}"
-: "${ONELAKE_TOKEN:?set ONELAKE_TOKEN}"
 ROWS="${DUCKDB_OBJFS_E2E_ROWS:-1000000}"
-SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
-# The azure extension's curl transport needs to be told where the CA bundle is.
-export CURL_CA_INFO="${CURL_CA_INFO:-/etc/ssl/certs/ca-certificates.crt}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
-FAILED=()
-
-if [[ ! -x "${DUCKDB_BIN}" ]]; then
-	echo "DuckDB executable not found at ${DUCKDB_BIN}" >&2
-	exit 1
-fi
-
-# Every phase is a separate process, so each one initializes the filesystem from scratch.
-preamble() {
-	cat <<EOF
-.timer on
-INSTALL azure;
-LOAD azure;
-LOAD duckdb_object_storage;
-SET GLOBAL azure_transport_option_type = 'curl';
-CREATE OR REPLACE SECRET onelake (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN getenv('ONELAKE_TOKEN'));
-SET duckdb_objfs_backend = 'azure';
-SET duckdb_objfs_bucket = '${WORKSPACE}';
-SET duckdb_objfs_root = '${ROOT}';
-CREATE TEMP TABLE checks (check_name VARCHAR, expected VARCHAR, actual VARCHAR);
-EOF
-}
-
-# Prints the checks as markdown into $1, then fails the phase if any check did not match.
-report() {
-	cat <<EOF
-SELECT * FROM duckdb_objfs_io_stats();
-.mode markdown
-.output $1
-SELECT check_name AS "check", expected, actual,
-       CASE WHEN expected IS NOT DISTINCT FROM actual THEN '✅' ELSE '❌' END AS result
-FROM checks ORDER BY rowid;
-.output
-.mode duckbox
-SELECT check_name, expected, actual, expected IS NOT DISTINCT FROM actual AS ok FROM checks ORDER BY rowid;
-SELECT CASE WHEN count(*) > 0 THEN error('failed checks: ' || string_agg(check_name, ', ')) ELSE 'all checks passed' END
-FROM checks WHERE expected IS DISTINCT FROM actual;
-EOF
-}
-
-run_phase() {
-	local name="$1"
-	local sql="${WORK_DIR}/${name}.sql" log="${WORK_DIR}/${name}.log" checks="${WORK_DIR}/${name}.md"
-	{
-		preamble
-		cat
-		report "${checks}"
-	} >"${sql}"
-	echo "=== phase: ${name}"
-	local start=${SECONDS} status=0
-	"${DUCKDB_BIN}" -bail -f "${sql}" 2>&1 | tee "${log}" || status=$?
-	local took=$((SECONDS - start)) mark="✅"
-	[[ ${status} -eq 0 ]] || mark="❌"
-	echo "=== phase ${name}: ${mark} ${took}s"
-	{
-		echo "### ${mark} ${name} (${took}s)"
-		[[ -s "${checks}" ]] && cat "${checks}"
-		if [[ ${status} -ne 0 ]]; then
-			echo '```'
-			grep -a -i "error" "${log}" | tail -n 5
-			echo '```'
-		fi
-		echo
-	} >>"${SUMMARY}"
-	[[ ${status} -eq 0 ]] || FAILED+=("${name}")
-}
+# shellcheck source=test/azure/common.sh
+source "${ROOT_DIR}/test/azure/common.sh"
 
 {
 	echo "## duckdb_objfs on OneLake: \`${WORKSPACE}/${ROOT}\`"
@@ -202,13 +131,6 @@ EOF
 # Accidental second writer: A attaches and commits; B attaches read-write while A is still open and
 # commits (fencing A); A then tries to commit again. The database must stay consistent: A's first
 # commit and B's rows survive, A's late write does not, and the database still opens.
-wait_for() {
-	for _ in $(seq 1 240); do
-		[[ -f "$1" ]] && return 0
-		sleep 0.5
-	done
-	return 1
-}
 A_IN="${WORK_DIR}/writer_a.in"
 A_LOG="${WORK_DIR}/writer_a.log"
 mkfifo "${A_IN}"
