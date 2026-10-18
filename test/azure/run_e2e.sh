@@ -114,15 +114,19 @@ FROM obj.items;
 DETACH obj;
 EOF
 
-# DuckLake with its DuckDB catalog on duckdb_objfs and its Parquet data in a plain OneLake folder.
-LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${ROOT}/lake_data/"
+# DuckLake with its DuckDB catalog on duckdb_objfs and its Parquet data in the lakehouse Tables/ section
+# (schema-enabled lakehouse: DuckLake's <data_path>/<schema>/<table>/ maps onto Tables/<schema>/<table>/).
+LAKEHOUSE="${ONELAKE_LAKEHOUSE:?set ONELAKE_LAKEHOUSE, e.g. lh.Lakehouse}"
+LAKE_SCHEMA="${DUCKLAKE_SCHEMA:-e2e}"
+LAKE_DATA="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Tables/"
 run_phase ducklake_write <<EOF
 INSTALL ducklake;
 LOAD ducklake;
 SET azure_transport_option_type = 'curl';
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (DATA_PATH '${LAKE_DATA}');
-CREATE TABLE lake.t AS SELECT range AS i FROM range(100000);
-INSERT INTO lake.t SELECT range AS i FROM range(100000, 100100);
+CREATE SCHEMA lake.${LAKE_SCHEMA};
+CREATE TABLE lake.${LAKE_SCHEMA}.t AS SELECT range AS i FROM range(100000);
+INSERT INTO lake.${LAKE_SCHEMA}.t SELECT range AS i FROM range(100000, 100100);
 SELECT * FROM ducklake_snapshots('lake');
 DETACH lake;
 EOF
@@ -131,10 +135,12 @@ run_phase ducklake_read <<EOF
 LOAD ducklake;
 SET azure_transport_option_type = 'curl';
 ATTACH 'ducklake:duckdb_objfs://catalog.ducklake' AS lake (READ_ONLY);
-SELECT CASE WHEN count(*) = 100100 THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END FROM lake.t;
-SELECT CASE WHEN count(*) = 100000 THEN 'time travel ok' ELSE error('rows at snapshot 1: ' || count(*)) END
-FROM lake.t AT (VERSION => 1);
-SELECT data_file FROM ducklake_list_files('lake', 't');
+SELECT CASE WHEN count(*) = 100100 THEN 'ducklake ok' ELSE error('ducklake rows: ' || count(*)) END
+FROM lake.${LAKE_SCHEMA}.t;
+-- Snapshots: 0 = catalog created, 1 = schema, 2 = CTAS, 3 = insert.
+SELECT CASE WHEN count(*) = 100000 THEN 'time travel ok' ELSE error('rows at snapshot 2: ' || count(*)) END
+FROM lake.${LAKE_SCHEMA}.t AT (VERSION => 2);
+SELECT data_file FROM ducklake_list_files('lake', 't', schema => '${LAKE_SCHEMA}');
 DETACH lake;
 EOF
 

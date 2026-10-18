@@ -6,6 +6,11 @@ on:
   push:
     branches: [onelake-azblob]
   workflow_dispatch:
+    inputs:
+      cleanup:
+        description: Delete this run's OneLake data at the end
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -17,14 +22,15 @@ concurrency:
 
 env:
   ONELAKE_WORKSPACE: mimtest
-  ONELAKE_LAKEHOUSE: temp.Lakehouse
+  # Schema-enabled lakehouse created for this POC.
+  ONELAKE_LAKEHOUSE: duckdb_objfs.Lakehouse
 
 jobs:
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      ONELAKE_ROOT: temp.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-rust
+      ONELAKE_ROOT: duckdb_objfs.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-rust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -58,9 +64,9 @@ jobs:
       - name: cargo test (includes live OneLake round trip)
         run: cargo test --manifest-path rust/Cargo.toml -- --nocapture
       - name: Clean up OneLake
-        if: always() && env.ONELAKE_TOKEN != ''
+        if: always() && env.ONELAKE_TOKEN != '' && inputs.cleanup != false
         run: |
-          curl -s -o /dev/null -w "cleanup: %{http_code}\n" -X DELETE \
+          curl -s -o /dev/null -w "cleanup ${ONELAKE_ROOT}: %{http_code}\n" -X DELETE \
             -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
             "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${ONELAKE_ROOT}?recursive=true"
 
@@ -68,7 +74,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
-      ONELAKE_ROOT: temp.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-ext
+      ONELAKE_ROOT: duckdb_objfs.Lakehouse/Files/duckdb_objfs_ci/${{ github.run_id }}-${{ github.run_attempt }}-ext
+      # DuckLake tables land in Tables/<schema>/; one schema per run.
+      DUCKLAKE_SCHEMA: ci_${{ github.run_id }}_${{ github.run_attempt }}
       GEN: ninja
       # Shallow submodules carry no tags; pin the version so INSTALL azure resolves.
       OVERRIDE_GIT_DESCRIBE: v1.5.6
@@ -100,8 +108,10 @@ jobs:
       - name: OneLake e2e
         run: bash test/azure/run_e2e.sh
       - name: Clean up OneLake
-        if: always() && env.ONELAKE_TOKEN != ''
+        if: always() && env.ONELAKE_TOKEN != '' && inputs.cleanup != false
         run: |
-          curl -s -o /dev/null -w "cleanup: %{http_code}\n" -X DELETE \
-            -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
-            "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${ONELAKE_ROOT}?recursive=true"
+          for path in "${ONELAKE_ROOT}" "${ONELAKE_LAKEHOUSE}/Tables/${DUCKLAKE_SCHEMA}"; do
+            curl -s -o /dev/null -w "cleanup ${path}: %{http_code}\n" -X DELETE \
+              -H "Authorization: Bearer ${ONELAKE_TOKEN}" -H "x-ms-version: 2023-11-03" \
+              "https://onelake.dfs.fabric.microsoft.com/${ONELAKE_WORKSPACE}/${path}?recursive=true"
+          done
