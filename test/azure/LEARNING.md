@@ -37,6 +37,23 @@ Possible improvements (not done): larger range reads, prefetch with many request
 finding where the extra reads come from. A local disk cache would hide the cold-read cost rather
 than fix it.
 
+## TPC-H SF10, DuckLake: catalog in duckdb_objfs, parquet in `Tables/` (2026-10-18)
+
+Same data, queries and runner. Fork CI run 39127568199. All 22 results matched the local parquet.
+
+| | DuckLake | duckdb_objfs `.db` | duckdb_iceberg |
+|---|---:|---:|---:|
+| Load | 99 s | 96 s | n/a |
+| 22 queries, cold | 183 s | 140 s | 44 s |
+| 22 queries, warm | 15.9 s | 6.3 s | 23.9 s |
+| 22 queries, local parquet | 17.2 s | 14 s | n/a |
+
+- The catalog is not the cost: duckdb_objfs saw 86 reads, 3.7 MB in total, for the whole query
+  phase. The cold time is DuckDB reading parquet from OneLake through the azure extension
+  (`abfss://`, `azure_transport_option_type = 'curl'`).
+- The same engine reading Iceberg in lakehouse_benchmark got 44 s cold. The difference is in the
+  read path (transport or settings), not in DuckLake. Not investigated yet.
+
 Other things learnt while writing the test:
 
 - DuckDB's `tpch_answers()` only goes up to SF1. At SF10 the check is the same query on the local
