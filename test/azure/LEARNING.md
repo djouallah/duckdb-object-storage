@@ -39,20 +39,28 @@ than fix it.
 
 ## TPC-H SF10, DuckLake: catalog in duckdb_objfs, parquet in `Tables/` (2026-10-18)
 
-Same data, queries and runner. Fork CI run 39127568199. All 22 results matched the local parquet.
+Same data, queries and runner. All 22 results matched the local parquet in both runs.
 
-| | DuckLake | duckdb_objfs `.db` | duckdb_iceberg |
-|---|---:|---:|---:|
-| Load | 99 s | 96 s | n/a |
-| 22 queries, cold | 183 s | 140 s | 44 s |
-| 22 queries, warm | 15.9 s | 6.3 s | 23.9 s |
-| 22 queries, local parquet | 17.2 s | 14 s | n/a |
+| | DuckLake, DuckDB writer defaults | DuckLake, 1M-row zstd row groups | duckdb_objfs `.db` | duckdb_iceberg |
+|---|---:|---:|---:|---:|
+| Fork CI run | 39127568199 | 39131500993 | 39122557565 | lakehouse_benchmark |
+| Load | 99 s | 61 s | 96 s | n/a |
+| 22 queries, cold | 183 s | **35 s** | 140 s | 44 s |
+| 22 queries, warm | 15.9 s | 23.4 s | 6.3 s | 23.9 s |
+| 22 queries, local parquet | 17.2 s | 21.6 s | 14 s | n/a |
 
+- **Row-group size was the whole cold-read gap.** DuckDB's parquet writer, and so DuckLake, defaults
+  to 122,880-row row groups with snappy. That means about 8x more column chunks, each one a small
+  range GET to OneLake. With `CALL lake.set_option('parquet_row_group_size', 1048576)` and
+  `set_option('parquet_compression', 'zstd')`, matching lakehouse_benchmark's Iceberg files, cold
+  went from 183 s to 35 s, faster than duckdb_iceberg on the same kind of runner.
+- With large row groups, cold is close to warm: the queries become CPU-bound, not latency-bound.
+  Warm got slower (15.9 s to 23.4 s) because zstd costs more CPU to decode than snappy. The local
+  run moving 17 s to 22 s on unchanged files shows a few seconds of runner noise too.
 - The catalog is not the cost: duckdb_objfs saw 86 reads, 3.7 MB in total, for the whole query
-  phase. The cold time is DuckDB reading parquet from OneLake through the azure extension
-  (`abfss://`, `azure_transport_option_type = 'curl'`).
-- The same engine reading Iceberg in lakehouse_benchmark got 44 s cold. The difference is in the
-  read path (transport or settings), not in DuckLake. Not investigated yet.
+  phase.
+- For anyone writing DuckLake to OneLake (or any object store) for OLAP: set the row-group size.
+  The default is tuned for local disk.
 
 Other things learnt while writing the test:
 
