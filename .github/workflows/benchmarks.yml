@@ -1,6 +1,6 @@
 name: benchmarks
 
-# POC, manual only: TPC-H SF10 on DuckLake in live OneLake (catalog in a duckdb_objfs database,
+# POC, manual only: TPC-H (scale factor input, default 10) on DuckLake in live OneLake (catalog in a duckdb_objfs database,
 # parquet in the lakehouse Tables/ section), with the duckdb binary from a build.yml run.
 # Timings go to the job summary; see test/azure/LEARNING.md.
 on:
@@ -10,6 +10,10 @@ on:
         description: 'build run whose duckdb artifact to use (default: latest successful build on the branch)'
         required: false
         default: ''
+      sf:
+        description: 'TPC-H scale factor'
+        required: false
+        default: '10'
 
 permissions:
   contents: read
@@ -28,7 +32,7 @@ env:
 jobs:
   tpch:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       # The binary comes from a build run: the one given, or the latest successful one on this branch.
@@ -65,10 +69,10 @@ jobs:
           token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
           echo "::add-mask::${token}"
           echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
-      - name: DuckLake TPC-H SF10 on OneLake (test/azure/tpch.sh)
-        timeout-minutes: 45
+      - name: DuckLake TPC-H SF${{ inputs.sf }} on OneLake (test/azure/tpch.sh)
+        timeout-minutes: 330
         env:
-          TPCH_SF: 10
+          TPCH_SF: ${{ inputs.sf }}
           TPCH_WORK_DIR: ${{ runner.temp }}/tpch
         run: |
           pipx install tpchgen-cli
