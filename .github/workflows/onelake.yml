@@ -113,14 +113,14 @@ jobs:
             if [ $status -ne 0 ]; then echo '```'; grep -a -i error ducklake.log | tail -n 5; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
-      # TPC-H SF10 loaded into a duckdb_objfs database, 22 queries checked against the local parquet.
+      # TPC-H SF10 on DuckLake (catalog in duckdb_objfs, parquet in Tables/), 22 queries checked against the local parquet.
       - name: Refresh OneLake token (TPC-H)
         if: always() && env.ONELAKE_TOKEN != ''
         run: |
           token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
           echo "::add-mask::${token}"
           echo "ONELAKE_TOKEN=${token}" >> "$GITHUB_ENV"
-      - name: OneLake TPC-H SF10 (test/azure/tpch.sh)
+      - name: DuckLake TPC-H SF10 on OneLake (test/azure/tpch.sh)
         if: always() && env.ONELAKE_TOKEN != ''
         timeout-minutes: 45
         env:

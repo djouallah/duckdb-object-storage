@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# TPC-H on a DuckDB database stored on live OneLake (port of the TPC-H part of
-# djouallah/lakehouse_benchmark). tpchgen-cli generates parquet locally; the tables are loaded into
-# duckdb_objfs://tpch_sf<N>.db, then the 22 queries run against OneLake from a fresh process.
+# TPC-H on DuckLake in live OneLake (port of the TPC-H part of djouallah/lakehouse_benchmark).
+# The DuckLake catalog is a duckdb_objfs database; the table data is parquet in the lakehouse
+# Tables/ section (schema tpch_sf<N>). tpchgen-cli generates parquet locally, the tables are loaded
+# into DuckLake, then the 22 queries run against OneLake from a fresh process.
 #
 # DuckDB's tpch_answers() stops at SF1, so each query also runs on the local parquet and the two
 # results must be identical (all money columns are DECIMAL, so the aggregates are exact).
@@ -15,11 +16,14 @@ mkdir -p "${WORK_DIR}"
 # shellcheck source=test/azure/common.sh
 source "${ROOT_DIR}/test/azure/common.sh"
 DATA="${WORK_DIR}/tpch_sf${SF}"
-DB="duckdb_objfs://tpch_sf${SF}.db"
+LAKEHOUSE="${ONELAKE_LAKEHOUSE:-${ROOT%%/*}}"
+DATA_PATH="abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/${LAKEHOUSE}/Tables/"
+CATALOG="ducklake:duckdb_objfs://tpch.ducklake"
+SCHEMA="tpch_sf${SF}"
 TABLES=(region nation supplier customer part partsupp orders lineitem)
 
 {
-	echo "## TPC-H SF${SF} on OneLake: \`${WORKSPACE}/${ROOT}/tpch_sf${SF}.db\`"
+	echo "## TPC-H SF${SF} on DuckLake: catalog \`${WORKSPACE}/${ROOT}/tpch.ducklake\`, data \`${LAKEHOUSE}/Tables/${SCHEMA}\`"
 	echo
 } >>"${SUMMARY}"
 
@@ -77,18 +81,21 @@ expected_rows() {
 }
 
 # run_phase reads from a process substitution, not a pipe, so FAILED is kept in this shell.
-run_phase tpch_load < <(
-	echo "ATTACH '${DB}' AS obj;"
+# Each run replaces the tables, then expires the old snapshots and deletes the previous run's files.
+run_phase tpch_load ducklake < <(
+	echo "ATTACH '${CATALOG}' AS lake (DATA_PATH '${DATA_PATH}', DATA_INLINING_ROW_LIMIT 0);"
+	echo "CREATE SCHEMA IF NOT EXISTS lake.${SCHEMA};"
 	for t in "${TABLES[@]}"; do
-		echo "CREATE OR REPLACE TABLE obj.${t} AS FROM read_parquet('$(parquet_of "${t}")');"
+		echo "CREATE OR REPLACE TABLE lake.${SCHEMA}.${t} AS FROM read_parquet('$(parquet_of "${t}")');"
 	done
-	echo "CHECKPOINT obj;"
-	echo "DETACH obj;"
-	echo "ATTACH '${DB}' AS obj (READ_ONLY);"
+	echo "CALL ducklake_expire_snapshots('lake', older_than => now());"
+	echo "CALL ducklake_cleanup_old_files('lake', cleanup_all => true);"
+	echo "DETACH lake;"
+	echo "ATTACH '${CATALOG}' AS lake (READ_ONLY);"
 	for t in "${TABLES[@]}"; do
-		echo "INSERT INTO checks SELECT '${t} rows', '$(expected_rows "${t}")', count(*)::VARCHAR FROM obj.${t};"
+		echo "INSERT INTO checks SELECT '${t} rows', '$(expected_rows "${t}")', count(*)::VARCHAR FROM lake.${SCHEMA}.${t};"
 	done
-	echo "DETACH obj;"
+	echo "DETACH lake;"
 )
 
 # ---------------------------------------------------------------- 22 queries: OneLake cold, hot, local
@@ -108,15 +115,15 @@ run_queries() {
 }
 
 TIMINGS="${WORK_DIR}/tpch_timings.md"
-run_phase tpch_queries < <(
-	echo "ATTACH '${DB}' AS obj (READ_ONLY);"
+run_phase tpch_queries ducklake < <(
+	echo "ATTACH '${CATALOG}' AS lake (READ_ONLY);"
 	echo "CREATE SCHEMA memory.ref;"
 	for t in "${TABLES[@]}"; do
 		echo "CREATE VIEW memory.ref.${t} AS FROM read_parquet('$(parquet_of "${t}")');"
 	done
 	echo "CREATE TEMP TABLE timings (query VARCHAR, run VARCHAR, seconds DOUBLE);"
-	run_queries obj.main onelake_cold o
-	run_queries obj.main onelake_hot h
+	run_queries lake.${SCHEMA} onelake_cold o
+	run_queries lake.${SCHEMA} onelake_hot h
 	run_queries memory.ref local_parquet r
 	echo "USE memory;"
 	# The cold results (o_) are the ones checked: every read behind them came from OneLake.
@@ -137,7 +144,7 @@ PIVOT (SELECT query, run, round(seconds, 2) AS seconds
 ON run IN ('onelake_cold', 'onelake_hot', 'local_parquet') USING first(seconds) GROUP BY query ORDER BY query;
 .output
 .mode duckbox
-DETACH obj;
+DETACH lake;
 SQL
 )
 
