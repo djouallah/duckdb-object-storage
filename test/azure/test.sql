@@ -3,7 +3,10 @@
 -- One catalog and one schema, reused by every run. Results: checks table, also written to ducklake_checks.md.
 
 .timer on
--- azure, ducklake and delta autoload; delta_export is a community extension.
+-- azure, ducklake and delta autoload (source builds ship with autoloading off, hence the SETs);
+-- delta_export is a community extension.
+SET autoinstall_known_extensions = true;
+SET autoload_known_extensions = true;
 INSTALL delta_export FROM community;
 LOAD delta_export;
 

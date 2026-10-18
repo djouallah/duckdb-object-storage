@@ -28,6 +28,8 @@ fi
 preamble() {
 	cat <<EOF
 .timer on
+SET autoinstall_known_extensions = true;
+SET autoload_known_extensions = true;
 CREATE OR REPLACE SECRET onelake (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN getenv('ONELAKE_TOKEN'));
 SET duckdb_objfs_backend = 'azure';
 SET duckdb_objfs_bucket = '${WORKSPACE}';
