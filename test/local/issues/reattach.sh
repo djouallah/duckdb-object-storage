@@ -15,8 +15,7 @@ $DUCKDB -c "$setup ATTACH 'duckdb_objfs://reattach.db' AS obj; INSERT INTO obj.t
 sleep 3
 echo "DETACH obj;
       ATTACH 'duckdb_objfs://reattach.db' AS again (READ_ONLY);
-      SELECT count(*) FROM again.t;
-      .quit" >&5
+      SELECT count(*) FROM again.t;" >&5
 exec 5>&-; wait
 echo "process A:"; cat a.log
 echo "process C (fresh):"

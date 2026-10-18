@@ -17,16 +17,21 @@ $DUCKDB -c "$setup ATTACH 'duckdb_objfs://readers.db' AS obj;
     if (( s % 3 == 0 )); then echo "CHECKPOINT obj;"; fi
   done; } > writer.sql
 
-{ echo "$setup SET memory_limit = '64MB'; SET threads = 2;"
-  echo "ATTACH 'duckdb_objfs://readers.db' AS obj (READ_ONLY);"
-  for q in $(seq 1 200); do
-    echo "SELECT count(*) AS row_count, count(DISTINCT batch) AS batches,
-      count(*) FILTER (WHERE payload IS DISTINCT FROM md5(batch || i)) AS bad_payloads FROM obj.filler;"
-  done; } > reader.sql
+# each answer goes to its own file: a reader is killed at the end, so its stdout would be lost
+mkdir answers
+for r in 1 2 3; do
+  { echo "$setup SET memory_limit = '64MB'; SET threads = 2;"
+    echo "ATTACH 'duckdb_objfs://readers.db' AS obj (READ_ONLY);"
+    for q in $(seq 1 200); do
+      echo "COPY (SELECT count(*) AS row_count, count(DISTINCT batch) AS batches,
+        count(*) FILTER (WHERE payload IS DISTINCT FROM md5(batch || i)) AS bad_payloads FROM obj.filler)
+        TO 'answers/$r-$q.csv' (HEADER false);"
+    done; } > reader_$r.sql
+done
 
 $DUCKDB -bail -f writer.sql > writer.log 2>&1 &
 sleep 3
-for r in 1 2 3; do $DUCKDB -csv -noheader -f reader.sql > reader_$r.log 2>&1 & done
+for r in 1 2 3; do $DUCKDB -f reader_$r.sql > reader_$r.log 2>&1 & done
 sleep 120; kill -9 %1 %2 %3 %4; wait
-echo "answers by value:"; grep -h -E '^[0-9]+,[0-9]+,[0-9]+$' reader_*.log | sort | uniq -c
+echo "answers (row_count,batches,bad_payloads):"; cat answers/*.csv | sort | uniq -c
 echo "errors:"; grep -h -i error reader_*.log | sort | uniq -c

@@ -21,5 +21,10 @@ for n in $(seq 1 10); do
   b=$?
   wait %1; a=$?
   echo "trial $n: A exit $a: $(grep -a -m1 -E 'what|Error' a_$n.log | cut -c1-170)"
-  echo "         B exit $b: $(grep -a -m1 -E 'what|Error' b_$n.log | cut -c1-170)"
+  echo "trial $n: B exit $b: $(grep -a -m1 -E 'what|Error' b_$n.log | cut -c1-170)"
+  # A inserts 0, 1, 2, ... one commit each and stops at its first error, so what survives must be
+  # 0..k with no hole; B's row -1 is there only if B's commit returned OK.
+  echo "trial $n: afterwards: $($DUCKDB -noheader -list -c "$setup $attach
+    SELECT 'rows ' || count(*) FILTER (WHERE i >= 0) || ', max ' || max(i) || ', holes ' || (max(i) + 1 - count(*) FILTER (WHERE i >= 0))
+        || ', B row ' || count(*) FILTER (WHERE i = -1) FROM obj.t;" 2>&1 | tail -n 1 | cut -c1-170)"
 done
