@@ -3,15 +3,18 @@
 -- One catalog and one schema, reused by every run. Results: checks table, also written to ducklake_checks.md.
 
 .timer on
--- azure, ducklake and delta autoload (source builds ship with autoloading off, hence the SETs);
--- delta_export is a community extension.
-SET autoinstall_known_extensions = true;
-SET autoload_known_extensions = true;
+INSTALL azure;
+LOAD azure;
+INSTALL ducklake;
+LOAD ducklake;
 INSTALL delta_export FROM community;
 LOAD delta_export;
+INSTALL delta;
+LOAD delta;
+LOAD duckdb_object_storage;
 
+SET GLOBAL azure_transport_option_type = 'curl';
 CREATE OR REPLACE SECRET onelake (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN getenv('ONELAKE_TOKEN'));
-SET GLOBAL azure_transport_option_type = 'curl';  -- after the secret, which autoloads azure
 SET duckdb_objfs_backend = 'azure';
 SET duckdb_objfs_bucket = 'mimtest';
 SET duckdb_objfs_root = 'duckdb_objfs.Lakehouse/Files/duckdb_objfs';
